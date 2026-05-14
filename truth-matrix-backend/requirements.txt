@@ -1,0 +1,13 @@
+﻿fastapi
+uvicorn
+python-multipart
+pillow
+opencv-python
+numpy
+python-dotenv
+pydantic
+firebase-admin
+supabase
+PyJWT
+requests
+email-validator
