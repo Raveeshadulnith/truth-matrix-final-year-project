@@ -56,6 +56,16 @@ export function ResultCard({
   const config = resultConfig[analysis.result];
   const Icon = config.icon;
   const meterTone = isFake ? 'danger' : isUncertain ? 'warning' : 'success';
+  const modelBadge =
+    analysis.fileType === 'video' ? 'EfficientNet-B4 + BiLSTM' : 'EfficientNet-B4';
+  const xaiTarget = analysis.xaiTargetClass
+    ? ` (${analysis.xaiTargetClass.replace(/_/g, ' ')})`
+    : '';
+  const xaiBadge = analysis.heatmapUrl
+    ? `${analysis.xaiMethod || 'Grad-CAM'}${xaiTarget}`
+    : analysis.fileType === 'audio'
+      ? 'Audio XAI pending'
+      : 'XAI unavailable';
   return (
     <motion.div
       initial={{
@@ -178,10 +188,10 @@ export function ResultCard({
             {/* Model Info */}
             <div className="flex flex-wrap gap-2 pt-4">
               <Badge variant="info" size="sm">
-                XceptionNet v2.1
+                {modelBadge}
               </Badge>
-              <Badge variant="default" size="sm">
-                Grad-CAM Enabled
+              <Badge variant={analysis.heatmapUrl ? 'default' : 'warning'} size="sm">
+                {xaiBadge}
               </Badge>
               {isFake &&
               <Badge variant="danger" size="sm">

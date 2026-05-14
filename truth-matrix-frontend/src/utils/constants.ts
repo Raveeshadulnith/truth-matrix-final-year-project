@@ -52,14 +52,14 @@ export const FEATURES = [
 {
   title: 'Real-time Detection',
   description:
-  'Analyze images and videos in seconds with our state-of-the-art XceptionNet model.',
+  'Analyze images and videos with the connected EfficientNet-B4 trained checkpoints.',
   icon: 'Zap',
   eyebrow: 'Fast inference'
 },
 {
   title: 'XAI Heatmaps',
   description:
-  'See exactly where manipulation occurred with Grad-CAM explainable AI visualizations.',
+  'See image overlays and sampled video frame maps with Grad-CAM explainable AI visualizations.',
   icon: 'Eye',
   eyebrow: 'Visual proof'
 },
@@ -96,7 +96,7 @@ export const STATS = [
 { label: 'Images Analyzed', value: '2.4M+', icon: 'Image' },
 { label: 'Deepfakes Caught', value: '847K+', icon: 'ShieldAlert' },
 { label: 'Active Users', value: '125K+', icon: 'Users' },
-{ label: 'Accuracy Rate', value: '99.2%', icon: 'Target' }];
+{ label: 'Model Modes', value: 'Image + Video', icon: 'Target' }];
 
 
 export const TESTIMONIALS = [
@@ -133,17 +133,17 @@ export const FAQ_ITEMS = [
 {
   question: 'How accurate is TruthMatrix?',
   answer:
-  'Our XceptionNet model achieves 99.2% accuracy on standard deepfake benchmarks including FaceForensics++ and Celeb-DF datasets.'
+  'TruthMatrix now uses your trained EfficientNet-B4 image checkpoint and EfficientNet-B4 plus BiLSTM video checkpoint. Report final accuracy from your own validation or test dataset run.'
 },
 {
   question: 'What types of deepfakes can you detect?',
   answer:
-  'We detect face swaps, lip-sync manipulations, full face synthesis (GAN-generated), and audio deepfakes.'
+  'The connected models analyze image and video manipulation signals. Audio analysis is reserved until the trained audio checkpoint is ready.'
 },
 {
   question: 'How does the heatmap visualization work?',
   answer:
-  'We use Grad-CAM (Gradient-weighted Class Activation Mapping) to highlight regions the AI focused on when making its decision.'
+  'We use Grad-CAM (Gradient-weighted Class Activation Mapping) to highlight image regions or sampled video frames the AI focused on when making its decision.'
 },
 {
   question: 'Is my uploaded content kept private?',

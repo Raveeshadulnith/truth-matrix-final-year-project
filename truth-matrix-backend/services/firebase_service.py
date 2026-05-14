@@ -7,7 +7,8 @@ import firebase_admin
 from dotenv import load_dotenv
 from firebase_admin import credentials, storage
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BASE_DIR / ".env", override=True, encoding="utf-8-sig")
 
 _MEDIA_FOLDERS = {
     "image": "truth-matrix/image",
@@ -21,7 +22,7 @@ def _resolve_service_account_path() -> Path:
     service_account_path = Path(configured_path)
 
     if not service_account_path.is_absolute():
-        service_account_path = Path(__file__).resolve().parents[1] / service_account_path
+        service_account_path = BASE_DIR / service_account_path
 
     return service_account_path
 

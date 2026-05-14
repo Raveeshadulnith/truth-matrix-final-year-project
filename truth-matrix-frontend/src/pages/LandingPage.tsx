@@ -101,9 +101,9 @@ export function LandingPage() {
               }}
               className="text-lg sm:text-xl text-gray-600 dark:text-gray-400 max-w-3xl mx-auto mb-10">
 
-              TruthMatrix uses advanced XceptionNet AI with explainable
-              heatmaps to detect deepfakes in images and videos with 99.2%
-              accuracy.
+              TruthMatrix uses trained EfficientNet-B4 image and temporal video
+              models with Grad-CAM XAI heatmaps to explain deepfake signals in
+              uploaded media.
             </motion.p>
 
             <motion.div
@@ -378,7 +378,7 @@ export function LandingPage() {
               step: '02',
               title: 'AI Analysis',
               description:
-              'Our XceptionNet model processes your media in seconds.'
+              'The connected image or video checkpoint processes your media.'
             },
             {
               step: '03',

@@ -41,6 +41,11 @@ function getHeatmapUrl(u) {
 
 function isDeepfake(result) { return result?.label === 'Suspected Deepfake'; }
 
+function probabilityText(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? `${Math.max(0, Math.min(100, num)).toFixed(1)}%` : '—';
+}
+
 /* ── empty ───────────────────────────────────────────── */
 function renderEmptyState() {
   statusContainer.innerHTML = `
@@ -119,7 +124,9 @@ function renderResultState(state) {
   const confidence = Math.max(0, Math.min(100, Number(result.confidence || 0)));
   const confText   = confidence.toFixed(1);
   const fake       = isDeepfake(result);
-  const heatUrl    = getHeatmapUrl(result.heatmap_url);
+  const heatUrl    = getHeatmapUrl(result.xai_panel_url || result.xai_overlay_url || result.heatmap_url);
+  const fakeProbText = probabilityText(result.fake_probability);
+  const authenticProbText = probabilityText(result.authentic_probability);
 
   /* SVG ring: circumference ≈ 2π×32 = 201 */
   const dashOffset = 201 - (201 * confidence / 100);
@@ -173,6 +180,14 @@ function renderResultState(state) {
             <span class="metric-label">Confidence</span>
             <span class="metric-value">${confText}%</span>
           </div>
+          <div class="metric-box">
+            <span class="metric-label">Deepfake probability</span>
+            <span class="metric-value">${esc(fakeProbText)}</span>
+          </div>
+          <div class="metric-box">
+            <span class="metric-label">Authentic probability</span>
+            <span class="metric-value">${esc(authenticProbText)}</span>
+          </div>
         </div>
 
         <div class="explain-box">
@@ -182,12 +197,13 @@ function renderResultState(state) {
 
         ${heatUrl ? `
           <div class="heatmap-box">
-            <span class="section-tag">XAI Heatmap</span>
+            <span class="section-tag">XAI Heatmap${result.xai_target_class ? ` (${esc(String(result.xai_target_class).replaceAll('_', ' '))})` : ''}</span>
             <img src="${esc(heatUrl)}" alt="Truth Matrix heatmap" />
+            <button class="heatmap-open" data-action="open" data-url="${esc(heatUrl)}" type="button">Open heatmap</button>
           </div>` : `
           <div class="heatmap-box no-heat">
             <span class="section-tag">XAI Heatmap</span>
-            <p>No heatmap returned yet — available once the explainable AI model is connected.</p>
+            <p>No Grad-CAM heatmap was returned. Make sure XAI heatmaps are enabled in the backend, then reanalyze.</p>
           </div>`}
 
         <div class="quick-actions">

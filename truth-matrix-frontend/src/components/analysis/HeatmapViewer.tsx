@@ -12,43 +12,55 @@ import { Button } from '../common/Button';
 interface HeatmapViewerProps {
   originalUrl: string;
   heatmapUrl?: string;
+  xaiPanelUrl?: string;
   filename: string;
   mediaType?: 'image' | 'video' | 'audio';
 }
 export function HeatmapViewer({
   originalUrl,
   heatmapUrl,
+  xaiPanelUrl,
   filename,
   mediaType = 'image'
 }: HeatmapViewerProps) {
-  const [viewMode, setViewMode] = useState<'original' | 'heatmap' | 'overlay'>(
-    'overlay'
-  );
+  const [viewMode, setViewMode] =
+    useState<'original' | 'heatmap' | 'overlay' | 'panel'>('overlay');
   const [overlayOpacity, setOverlayOpacity] = useState(50);
   const [zoom, setZoom] = useState(100);
   const isImage = mediaType === 'image';
-  const supportsHeatmap = isImage && Boolean(heatmapUrl);
-  const viewModes = [
-  {
-    id: 'original',
-    label: 'Original',
-    icon: EyeIcon
-  },
-  {
-    id: 'heatmap',
-    label: 'Heatmap',
-    icon: LayersIcon
-  },
-  {
-    id: 'overlay',
-    label: 'Overlay',
-    icon: EyeOffIcon
-  }] as
-  const;
-  const availableViewModes = useMemo(
-    () => supportsHeatmap ? viewModes : [viewModes[0]],
-    [supportsHeatmap]
-  );
+  const supportsHeatmap = mediaType !== 'audio' && Boolean(heatmapUrl);
+  const availableViewModes = useMemo(() => {
+    const originalMode = {
+      id: 'original' as const,
+      label: 'Original',
+      icon: EyeIcon
+    };
+    const heatmapMode = {
+      id: 'heatmap' as const,
+      label: mediaType === 'video' ? 'XAI Frames' : 'Heatmap',
+      icon: LayersIcon
+    };
+    const overlayMode = {
+      id: 'overlay' as const,
+      label: 'Overlay',
+      icon: EyeOffIcon
+    };
+    const panelMode = {
+      id: 'panel' as const,
+      label: 'XAI Panel',
+      icon: LayersIcon
+    };
+
+    if (!supportsHeatmap) {
+      return [originalMode];
+    }
+
+    return isImage
+      ? xaiPanelUrl
+        ? [originalMode, heatmapMode, overlayMode, panelMode]
+        : [originalMode, heatmapMode, overlayMode]
+      : [originalMode, heatmapMode];
+  }, [isImage, mediaType, supportsHeatmap, xaiPanelUrl]);
   useEffect(() => {
     if (!availableViewModes.some((mode) => mode.id === viewMode)) {
       setViewMode('original');
@@ -134,6 +146,48 @@ export function HeatmapViewer({
 
     );
   };
+  const renderHeatmapMedia = () => {
+    const sourceUrl = viewMode === 'panel' && xaiPanelUrl ? xaiPanelUrl : heatmapUrl;
+
+    if (!sourceUrl) {
+      return null;
+    }
+
+    return (
+      <motion.img
+        src={sourceUrl}
+        alt={`${filename} Grad-CAM heatmap`}
+        className={sharedMediaClassName}
+        initial={{
+          opacity: 0
+        }}
+        animate={{
+          opacity: 1
+        }}
+        transition={{
+          duration: 0.3
+        }} />
+
+    );
+  };
+
+  const openCurrentView = () => {
+    const url =
+      viewMode === 'panel' && xaiPanelUrl
+        ? xaiPanelUrl
+        : viewMode !== 'original' && heatmapUrl
+          ? heatmapUrl
+          : originalUrl;
+    if (url) {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  const showOriginalMedia = viewMode === 'original' || viewMode === 'overlay';
+  const showStandaloneHeatmap =
+    supportsHeatmap && (viewMode === 'heatmap' || viewMode === 'panel');
+  const showImageOverlay = isImage && supportsHeatmap && viewMode === 'overlay';
+
   return (
     <div className="rounded-2xl border border-gray-200 dark:border-navy-700 overflow-hidden bg-white dark:bg-navy-800">
       {/* Toolbar */}
@@ -202,9 +256,10 @@ export function HeatmapViewer({
           <Button
             variant="ghost"
             size="sm"
-            leftIcon={<DownloadIcon className="w-4 h-4" />}>
+            leftIcon={<DownloadIcon className="w-4 h-4" />}
+            onClick={openCurrentView}>
 
-            Save
+            Open
           </Button>
         </div>
       </div>
@@ -225,11 +280,11 @@ export function HeatmapViewer({
 
           <div className="relative">
             {/* Original Media */}
-            {renderOriginalMedia()}
+            {showOriginalMedia && renderOriginalMedia()}
+            {showStandaloneHeatmap && renderHeatmapMedia()}
 
             {/* Heatmap Overlay */}
-            {supportsHeatmap && (
-            viewMode === 'heatmap' || viewMode === 'overlay') &&
+            {showImageOverlay &&
             <motion.img
               src={heatmapUrl}
               alt={`${filename} heatmap`}
@@ -248,9 +303,27 @@ export function HeatmapViewer({
         </div>
       </div>
 
-      {!isImage &&
+      {mediaType === 'audio' &&
       <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
-          Explainable heatmap overlays are currently shown for image analyses. For this result, the original media preview is displayed here.
+          Audio XAI is not available yet because the trained audio model is still in progress.
+        </div>
+      }
+
+      {mediaType === 'video' && supportsHeatmap &&
+      <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
+          The XAI Frames view shows Grad-CAM overlays for sampled video frames that contributed to the temporal model decision.
+        </div>
+      }
+
+      {mediaType === 'image' && supportsHeatmap &&
+      <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
+          The Heatmap view is the raw Grad-CAM map. Overlay blends that raw map over the original image, while XAI Panel compares original, map, and overlay side by side.
+        </div>
+      }
+
+      {mediaType !== 'audio' && !supportsHeatmap &&
+      <div className="border-t border-gray-200 bg-amber-50/70 px-4 py-3 text-sm text-amber-800 dark:border-navy-700 dark:bg-amber-500/10 dark:text-amber-200">
+          No Grad-CAM heatmap was returned for this analysis. Try reanalyzing after confirming XAI is enabled in the backend.
         </div>
       }
 
