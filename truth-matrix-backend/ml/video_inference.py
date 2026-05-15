@@ -18,6 +18,7 @@ Model file location:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Dict, List, Union
 
@@ -42,6 +43,19 @@ IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 # Lazy singletons
 _model  = None
 _device = None
+
+
+def _fake_class_index() -> int:
+    configured = os.getenv("VIDEO_FAKE_CLASS_INDEX", "1").strip()
+    try:
+        value = int(configured)
+    except ValueError as exc:
+        raise RuntimeError("VIDEO_FAKE_CLASS_INDEX must be 0 or 1") from exc
+
+    if value not in (0, 1):
+        raise RuntimeError("VIDEO_FAKE_CLASS_INDEX must be 0 or 1")
+
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -242,12 +256,16 @@ def analyze_video(video_path: str) -> Dict[str, Union[str, float, int, None]]:
 
         with torch.no_grad():
             probs     = model(clip)           # (1, 2)
-            fake_prob = probs[0, 1].item()    # probability of class "fake"
+            fake_index = _fake_class_index()
+            authentic_index = 1 - fake_index
+            fake_prob = probs[0, fake_index].item()
+            authentic_prob = probs[0, authentic_index].item()
 
         is_fake         = fake_prob >= 0.5
         label           = LABELS[1] if is_fake else LABELS[0]
-        confidence      = round((fake_prob if is_fake else 1.0 - fake_prob) * 100, 2)
+        confidence      = round((fake_prob if is_fake else authentic_prob) * 100, 2)
         frames_analyzed = len(frames)
+        class_idx       = fake_index if is_fake else authentic_index
 
         explanation = (
             f"EfficientNet-CNN + LSTM video model (trained on CelebDF) analysed "
@@ -262,13 +280,28 @@ def analyze_video(video_path: str) -> Dict[str, Union[str, float, int, None]]:
             )
         )
 
+        # GradCAM heatmap grid (best-effort — failure never blocks the result)
+        heatmap_url = None
+        try:
+            from ml.xai import generate_video_heatmap, save_heatmap_result
+            heatmap_rgb = generate_video_heatmap(model, device, frames, class_idx)
+            if heatmap_rgb is not None:
+                heatmap_url = save_heatmap_result(
+                    heatmap_rgb, video_path, "video-gradcam"
+                )
+        except Exception:
+            logger.warning("[video_inference] GradCAM skipped", exc_info=True)
+
         return {
             "media_type":      "video",
             "label":           label,
             "confidence":      confidence,
+            "fake_probability": round(fake_prob * 100, 2),
+            "authentic_probability": round(authentic_prob * 100, 2),
             "frames_analyzed": frames_analyzed,
             "explanation":     explanation,
-            "heatmap_url":     None,
+            "heatmap_url":     heatmap_url,
+            "xai_method":      "Grad-CAM" if heatmap_url else None,
         }
 
     except FileNotFoundError:

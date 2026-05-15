@@ -35,11 +35,21 @@ export interface BackendAnalysisRecord {
   original_filename?: string | null;
   firebase_url?: string | null;
   heatmap_url?: string | null;
+  xai_overlay_url?: string | null;
+  xai_panel_url?: string | null;
   label: 'Authentic' | 'Suspected Deepfake';
   confidence: number;
+  fake_probability?: number | null;
+  authentic_probability?: number | null;
   explanation?: string | null;
   frames_analyzed?: number | null;
   created_at?: string;
+  xai_method?: string | null;
+  xai_target_class?: string | null;
+  xai_predicted_class?: string | null;
+  xai_layer?: string | null;
+  xai_map_strength?: number | null;
+  xai_error?: string | null;
 }
 
 export interface BackendAnalysisResponse {
@@ -47,10 +57,20 @@ export interface BackendAnalysisResponse {
   media_type: 'image' | 'video' | 'audio';
   label: 'Authentic' | 'Suspected Deepfake';
   confidence: number;
+  fake_probability?: number | null;
+  authentic_probability?: number | null;
   explanation?: string;
   frames_analyzed?: number | null;
   firebase_url?: string | null;
   heatmap_url?: string | null;
+  xai_overlay_url?: string | null;
+  xai_panel_url?: string | null;
+  xai_method?: string | null;
+  xai_target_class?: string | null;
+  xai_predicted_class?: string | null;
+  xai_layer?: string | null;
+  xai_map_strength?: number | null;
+  xai_error?: string | null;
   original_filename?: string | null;
   saved_record?: BackendAnalysisRecord | null;
 }

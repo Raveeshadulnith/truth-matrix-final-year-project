@@ -15,6 +15,7 @@ Model file location:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Union
 
@@ -35,6 +36,20 @@ IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 # Lazy singletons
 _model  = None
 _device = None
+
+
+def _fake_class_index() -> int:
+    # The backup configuration used class 0 for the image checkpoint's fake class.
+    configured = os.getenv("IMAGE_FAKE_CLASS_INDEX", "0").strip()
+    try:
+        value = int(configured)
+    except ValueError as exc:
+        raise RuntimeError("IMAGE_FAKE_CLASS_INDEX must be 0 or 1") from exc
+
+    if value not in (0, 1):
+        raise RuntimeError("IMAGE_FAKE_CLASS_INDEX must be 0 or 1")
+
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -178,11 +193,15 @@ def analyze_image(image_path: str) -> Dict[str, Union[str, float, None]]:
 
         with torch.no_grad():
             probs    = model(tensor)          # (1, 2)
-            fake_prob = probs[0, 1].item()    # probability of class "fake"
+            fake_index = _fake_class_index()
+            authentic_index = 1 - fake_index
+            fake_prob = probs[0, fake_index].item()
+            authentic_prob = probs[0, authentic_index].item()
 
         is_fake    = fake_prob >= 0.5
         label      = LABELS[1] if is_fake else LABELS[0]
-        confidence = round((fake_prob if is_fake else 1.0 - fake_prob) * 100, 2)
+        confidence = round((fake_prob if is_fake else authentic_prob) * 100, 2)
+        class_idx  = fake_index if is_fake else authentic_index
 
         explanation = (
             f"EfficientNet-B4 image model assigned a deepfake probability of "
@@ -196,12 +215,27 @@ def analyze_image(image_path: str) -> Dict[str, Union[str, float, None]]:
             )
         )
 
+        # GradCAM heatmap (best-effort — failure here never blocks the result)
+        heatmap_url = None
+        try:
+            from ml.xai import generate_image_heatmap, save_heatmap_result
+            heatmap_rgb = generate_image_heatmap(model, device, image_path, class_idx)
+            if heatmap_rgb is not None:
+                heatmap_url = save_heatmap_result(
+                    heatmap_rgb, image_path, "image-gradcam"
+                )
+        except Exception:
+            logger.warning("[image_inference] GradCAM skipped", exc_info=True)
+
         return {
-            "media_type":  "image",
-            "label":       label,
-            "confidence":  confidence,
-            "explanation": explanation,
-            "heatmap_url": None,
+            "media_type":   "image",
+            "label":        label,
+            "confidence":   confidence,
+            "fake_probability": round(fake_prob * 100, 2),
+            "authentic_probability": round(authentic_prob * 100, 2),
+            "explanation":  explanation,
+            "heatmap_url":  heatmap_url,
+            "xai_method": "Grad-CAM" if heatmap_url else None,
         }
 
     except FileNotFoundError:

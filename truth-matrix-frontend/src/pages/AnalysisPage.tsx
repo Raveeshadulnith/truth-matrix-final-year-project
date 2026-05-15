@@ -54,7 +54,7 @@ export function AnalysisPage() {
   const [result, setResult] = useState<any>(null);
 
   const selectedOption = getSelectedOption(mediaType);
-  const heatmapSource = result?.heatmapUrl;
+  const heatmapSource = result?.xaiPanelUrl || result?.heatmapUrl;
 
   // result.result is 'fake' | 'real' | 'uncertain' (mapped in store)
   const isSuspectedDeepfake = result?.result === 'fake';

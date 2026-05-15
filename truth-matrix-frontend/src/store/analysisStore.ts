@@ -27,6 +27,14 @@ export interface Analysis {
   realProb: number;
   processingTime: number;
   heatmapUrl?: string;
+  xaiOverlayUrl?: string;
+  xaiPanelUrl?: string;
+  xaiMethod?: string;
+  xaiTargetClass?: string;
+  xaiPredictedClass?: string;
+  xaiLayer?: string;
+  xaiMapStrength?: number;
+  xaiError?: string;
   artifacts: Artifact[];
   createdAt: string;
   isPublic: boolean;
@@ -121,6 +129,89 @@ function resultFromLabel(label: string): 'real' | 'fake' | 'uncertain' {
   return 'uncertain';
 }
 
+function buildArtifacts(input: {
+  mediaType: 'image' | 'video' | 'audio';
+  result: 'real' | 'fake' | 'uncertain';
+  confidence: number;
+  fakeProb: number;
+  realProb: number;
+  heatmapUrl: string;
+  xaiMethod?: string;
+  xaiTargetClass?: string;
+  xaiLayer?: string;
+  xaiError?: string;
+  framesAnalyzed?: number | null;
+}): Artifact[] {
+  const artifacts: Artifact[] = [];
+  const method = input.xaiMethod || 'Grad-CAM';
+  const targetText = input.xaiTargetClass
+    ? input.xaiTargetClass.replace(/_/g, ' ')
+    : 'model';
+
+  if (input.result === 'fake') {
+    artifacts.push({
+      id: 'model_manipulation_signal',
+      type:
+        input.mediaType === 'video'
+          ? 'temporal_manipulation_signal'
+          : 'visual_manipulation_signal',
+      confidence: input.fakeProb,
+      location:
+        input.mediaType === 'video'
+          ? 'sampled_video_frames'
+          : 'grad_cam_attention_regions',
+      description:
+        input.mediaType === 'video'
+          ? `The trained video model found manipulation signals across sampled frames with ${input.fakeProb.toFixed(1)}% deepfake probability.`
+          : `The trained image model found manipulation signals in the Grad-CAM attention regions with ${input.fakeProb.toFixed(1)}% deepfake probability.`,
+    });
+  }
+
+  if (input.heatmapUrl) {
+    artifacts.push({
+      id: 'xai_gradcam_heatmap',
+      type: input.mediaType === 'video' ? 'gradcam_frame_heatmap' : 'gradcam_heatmap',
+      confidence:
+        input.result === 'fake'
+          ? input.fakeProb
+          : input.result === 'real'
+            ? input.realProb
+            : input.confidence,
+      location:
+        input.mediaType === 'video'
+          ? `${input.framesAnalyzed || 'sampled'}_video_frames`
+          : 'image_attention_map',
+      description:
+        input.mediaType === 'video'
+          ? `${method} generated a frame contact sheet showing which sampled video regions influenced the model decision.`
+          : `${method} generated an image heatmap for the ${targetText} class using ${input.xaiLayer || 'the configured model layer'}.`,
+    });
+  }
+
+  if (!input.heatmapUrl && input.xaiError) {
+    artifacts.push({
+      id: 'xai_generation_error',
+      type: 'xai_generation_error',
+      confidence: input.confidence,
+      location: 'grad_cam_backend',
+      description: `Grad-CAM could not produce a heatmap for this request: ${input.xaiError}`,
+    });
+  }
+
+  if (input.result === 'uncertain') {
+    artifacts.push({
+      id: 'low_confidence_signal',
+      type: 'uncertain_model_signal',
+      confidence: input.confidence,
+      location: 'model_output',
+      description:
+        'The model confidence is not strong enough for a definitive artifact-level verdict.',
+    });
+  }
+
+  return artifacts;
+}
+
 function mapBackendAnalysis(
   backendAnalysis: BackendAnalysis,
   options: {
@@ -150,8 +241,60 @@ function mapBackendAnalysis(
     savedRecord?.heatmap_url ||
       ('heatmap_url' in backendAnalysis ? backendAnalysis.heatmap_url : null)
   );
-  const fakeProb = result === 'fake' ? confidence : 100 - confidence;
-  const realProb = result === 'real' ? confidence : 100 - confidence;
+  const xaiOverlayUrl = resolveBackendUrl(
+    savedRecord?.xai_overlay_url ||
+      ('xai_overlay_url' in backendAnalysis ? backendAnalysis.xai_overlay_url : null)
+  );
+  const xaiPanelUrl = resolveBackendUrl(
+    savedRecord?.xai_panel_url ||
+      ('xai_panel_url' in backendAnalysis ? backendAnalysis.xai_panel_url : null)
+  );
+  const xaiMethod =
+    savedRecord?.xai_method ||
+    ('xai_method' in backendAnalysis ? backendAnalysis.xai_method || undefined : undefined);
+  const xaiTargetClass =
+    savedRecord?.xai_target_class ||
+    ('xai_target_class' in backendAnalysis
+      ? backendAnalysis.xai_target_class || undefined
+      : undefined);
+  const xaiPredictedClass =
+    savedRecord?.xai_predicted_class ||
+    ('xai_predicted_class' in backendAnalysis
+      ? backendAnalysis.xai_predicted_class || undefined
+      : undefined);
+  const xaiLayer =
+    savedRecord?.xai_layer ||
+    ('xai_layer' in backendAnalysis ? backendAnalysis.xai_layer || undefined : undefined);
+  const xaiMapStrength =
+    'xai_map_strength' in backendAnalysis &&
+    typeof backendAnalysis.xai_map_strength === 'number'
+      ? backendAnalysis.xai_map_strength
+      : undefined;
+  const xaiError =
+    savedRecord?.xai_error ||
+    ('xai_error' in backendAnalysis ? backendAnalysis.xai_error || undefined : undefined);
+  const backendFakeProb =
+    'fake_probability' in backendAnalysis
+      ? backendAnalysis.fake_probability
+      : undefined;
+  const backendAuthenticProb =
+    'authentic_probability' in backendAnalysis
+      ? backendAnalysis.authentic_probability
+      : undefined;
+  const fakeProb =
+    typeof backendFakeProb === 'number'
+      ? backendFakeProb
+      : result === 'fake'
+        ? confidence
+        : 100 - confidence;
+  const realProb =
+    typeof backendAuthenticProb === 'number'
+      ? backendAuthenticProb
+      : result === 'real'
+        ? confidence
+        : 100 - confidence;
+  const boundedFakeProb = Math.max(0, Math.min(100, fakeProb));
+  const boundedRealProb = Math.max(0, Math.min(100, realProb));
 
   // ── Pull model-provided explanation & frames_analyzed ─────────────────────
   const explanation: string | undefined =
@@ -166,6 +309,19 @@ function mapBackendAnalysis(
     (savedRecord && 'frames_analyzed' in savedRecord
       ? ((savedRecord as any).frames_analyzed ?? undefined)
       : undefined);
+  const artifacts = buildArtifacts({
+    mediaType,
+    result,
+    confidence,
+    fakeProb: boundedFakeProb,
+    realProb: boundedRealProb,
+    heatmapUrl,
+    xaiMethod,
+    xaiTargetClass,
+    xaiLayer,
+    xaiError,
+    framesAnalyzed,
+  });
 
   return {
     id:
@@ -186,11 +342,19 @@ function mapBackendAnalysis(
     thumbnailUrl: mediaType === 'image' ? mediaUrl || heatmapUrl : '',
     result,
     confidence,
-    fakeProb: Math.max(0, Math.min(100, fakeProb)),
-    realProb: Math.max(0, Math.min(100, realProb)),
+    fakeProb: boundedFakeProb,
+    realProb: boundedRealProb,
     processingTime: options.processingTime || 0,
     heatmapUrl: heatmapUrl || undefined,
-    artifacts: [],
+    xaiOverlayUrl: xaiOverlayUrl || undefined,
+    xaiPanelUrl: xaiPanelUrl || undefined,
+    xaiMethod,
+    xaiTargetClass,
+    xaiPredictedClass,
+    xaiLayer,
+    xaiMapStrength,
+    xaiError,
+    artifacts,
     createdAt: savedRecord?.created_at || new Date().toISOString(),
     isPublic: false,
     // ── Real model fields ──────────────────────────────────────────────────

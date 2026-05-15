@@ -77,6 +77,14 @@ export function ResultCard({
     Icon: ImageIcon,
   };
   const ModelIcon = modelInfo.Icon;
+  const xaiTarget = analysis.xaiTargetClass
+    ? ` (${analysis.xaiTargetClass.replace(/_/g, ' ')})`
+    : '';
+  const xaiBadge = analysis.heatmapUrl
+    ? `${analysis.xaiMethod || 'Grad-CAM'}${xaiTarget}`
+    : analysis.fileType === 'audio'
+      ? 'Audio XAI pending'
+      : 'XAI unavailable';
 
   return (
     <motion.div
@@ -180,6 +188,10 @@ export function ResultCard({
                   {(analysis as any).framesAnalyzed} frames analysed
                 </Badge>
               )}
+
+              <Badge variant={analysis.heatmapUrl ? 'default' : 'warning'} size="sm">
+                {xaiBadge}
+              </Badge>
 
               {/* High-confidence warning */}
               {isFake && analysis.confidence >= 80 && (

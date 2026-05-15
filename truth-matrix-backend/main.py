@@ -1,7 +1,13 @@
+import logging
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
+
+import requests
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +32,7 @@ from schemas.auth_schema import (
     SignupRequest,
 )
 from schemas.response_schema import AnalysisResponse, ImageUrlRequest
-from services.firebase_service import upload_file_to_firebase
+from services.firebase_service import upload_file_to_firebase, upload_heatmap_to_firebase
 from services.supabase_service import (
     delete_analysis_result,
     get_analysis_result_by_id,
@@ -55,6 +61,7 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv"}
 AUDIO_EXTENSIONS = {"wav", "mp3", "m4a"}
+MAX_REMOTE_IMAGE_BYTES = int(os.getenv("MAX_REMOTE_IMAGE_BYTES", str(15 * 1024 * 1024)))
 
 app = FastAPI(
     title="Truth Matrix Deepfake Detection Backend",
@@ -280,6 +287,21 @@ async def _analyze_upload(
     try:
         await save_upload_file(file, temp_path)
         analysis_result = analyzer(str(temp_path))
+
+        # Upload GradCAM heatmap produced by the ML layer (best-effort)
+        heatmap_local = analysis_result.pop("heatmap_path", None)
+        if heatmap_local:
+            try:
+                heatmap_url = upload_heatmap_to_firebase(
+                    heatmap_local, f"{media_type}_heatmap.png"
+                )
+                analysis_result["heatmap_url"] = heatmap_url
+                logger.info("[analyze] heatmap uploaded: %s", heatmap_url)
+            except Exception as exc:
+                logger.warning("[analyze] heatmap upload failed: %s", exc)
+            finally:
+                remove_file_if_exists(heatmap_local)
+
         firebase_url = upload_file_to_firebase(
             str(temp_path),
             media_type,
@@ -348,13 +370,93 @@ async def analyze_audio_endpoint(
     )
 
 
+def _guess_remote_image_extension(image_url: str, content_type: str) -> str:
+    clean_content_type = content_type.split(";", 1)[0].strip().lower()
+    guessed_extension = (
+        mimetypes.guess_extension(clean_content_type) if clean_content_type else None
+    )
+
+    if guessed_extension:
+        extension = guessed_extension.lstrip(".").lower()
+        if extension == "jpe":
+            return "jpg"
+        if extension in IMAGE_EXTENSIONS:
+            return extension
+
+    path_extension = get_file_extension(urlparse(image_url).path)
+    if path_extension in IMAGE_EXTENSIONS:
+        return path_extension
+
+    return "jpg"
+
+
+def _download_image_url_to_temp(image_url: str) -> Path:
+    temp_path: Optional[Path] = None
+
+    try:
+        response = requests.get(
+            image_url,
+            headers={"User-Agent": "TruthMatrix/1.0"},
+            stream=True,
+            timeout=(5, 20),
+        )
+        response.raise_for_status()
+
+        content_type = response.headers.get("content-type", "")
+        if content_type and not content_type.lower().startswith("image/"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="image_url did not return an image response",
+            )
+
+        extension = _guess_remote_image_extension(image_url, content_type)
+        temp_path = UPLOAD_DIR / generate_temp_filename(extension)
+
+        downloaded_bytes = 0
+        with temp_path.open("wb") as destination:
+            for chunk in response.iter_content(chunk_size=1024 * 64):
+                if not chunk:
+                    continue
+
+                downloaded_bytes += len(chunk)
+                if downloaded_bytes > MAX_REMOTE_IMAGE_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="Remote image is too large to analyze",
+                    )
+
+                destination.write(chunk)
+
+        if downloaded_bytes == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="image_url returned an empty image response",
+            )
+
+        return temp_path
+    except HTTPException:
+        if temp_path:
+            remove_file_if_exists(temp_path)
+        raise
+    except requests.RequestException as exc:
+        if temp_path:
+            remove_file_if_exists(temp_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not download image_url: {exc}",
+        ) from exc
+    finally:
+        if "response" in locals():
+            response.close()
+
+
 @app.post("/api/analyze/image-url", response_model=AnalysisResponse)
 def analyze_image_url_endpoint(payload: ImageUrlRequest) -> Dict[str, Any]:
     """Public endpoint for the browser extension.
 
-    The current dummy inference does not download remote images. Later you can
-    download the image into uploads/, analyze it, upload it to Firebase, and
-    optionally save it for an authenticated extension user.
+    Downloads the remote image into temporary storage, runs the trained image
+    model, then deletes the temporary file. This endpoint intentionally does not
+    save public extension scans into authenticated user history.
     """
     image_url = payload.image_url.strip()
 
@@ -364,13 +466,20 @@ def analyze_image_url_endpoint(payload: ImageUrlRequest) -> Dict[str, Any]:
             detail="image_url must start with http:// or https://",
         )
 
+    temp_path: Optional[Path] = None
     try:
-        return analyze_image(image_url)
+        temp_path = _download_image_url_to_temp(image_url)
+        return analyze_image(str(temp_path))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Image URL analysis failed. Please try again later.",
+            detail=f"Image URL analysis failed: {exc}",
         ) from exc
+    finally:
+        if temp_path:
+            remove_file_if_exists(temp_path)
 
 
 @app.get("/api/results")

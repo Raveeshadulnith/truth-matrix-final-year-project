@@ -72,15 +72,10 @@ export function Button({
       disabled={disabled || isLoading}
       {...props}>
 
-      {isLoading ?
-      <Loader2Icon className="w-5 h-5 animate-spin" /> :
-
-      <>
-          {leftIcon && <span className="flex-shrink-0">{leftIcon}</span>}
-          {children}
-          {rightIcon && <span className="flex-shrink-0">{rightIcon}</span>}
-        </>
-      }
+      {isLoading && <Loader2Icon className="w-5 h-5 animate-spin" />}
+      {!isLoading && leftIcon && <span className="flex-shrink-0">{leftIcon}</span>}
+      {children}
+      {!isLoading && rightIcon && <span className="flex-shrink-0">{rightIcon}</span>}
     </motion.button>);
 
 }
