@@ -1,208 +1,278 @@
+"""
+Video deepfake inference — EfficientNet CNN + Bidirectional LSTM, trained on CelebDF.
+
+Confirmed architecture (mathematically derived from all RuntimeError shape messages):
+    cnn.*                                      ← EfficientNet-B4, output 1792-dim
+    lstm  hidden_size=512, num_layers=2,
+          bidirectional=True
+          weight_ih_l0 (2048, 1792) → 4×512 rows, 1792 cols  ✓
+          weight_hh_l0 (2048, 512)  → 4×512 rows, 512 cols   ✓
+          weight_ih_l1 (2048, 1024) → 4×512 rows, 2×512 cols ✓ (bidir l0 output)
+    classifier.1  Linear(1024 → 256)          ← 2*hidden input
+    classifier.4  Linear(256  → 2)            ← 2-class [real, fake]
+
+Model file location:
+    truth-matrix-backend/ml/models/video_model_celebdf.pth
+"""
+
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, List, Union
-from uuid import uuid4
 
-import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
 
-from ml.model_common import (
-    ModelSetupError,
-    RESULTS_DIR,
-    env_bool,
-    env_int,
-    load_video_model,
-    model_input_size,
-    prediction_payload,
-    preprocess_pil_image,
-    torch,
-    video_frame_count,
-)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Config  (confirmed from error messages)
+# ---------------------------------------------------------------------------
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "video_model_celebdf.pth"
+
+LABELS      = ["Authentic", "Suspected Deepfake"]
+NUM_FRAMES  = 16
+IMAGE_SIZE  = 224
+LSTM_HIDDEN = 512    # confirmed: weight_ih_l0=(2048,1792) → 4*512=2048 rows
+LSTM_LAYERS = 2
+LSTM_BIDIR  = True   # confirmed: weight_ih_l1 cols=1024=2*512 (bidirectional l0 output)
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+# Lazy singletons
+_model  = None
+_device = None
 
 
-def _read_frame_at(cap: cv2.VideoCapture, frame_index: int):
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-    ok, frame = cap.read()
-    return frame if ok else None
+# ---------------------------------------------------------------------------
+# Model definition  (must match checkpoint shapes exactly)
+# ---------------------------------------------------------------------------
+def _build_model():
+    """
+    EfficientNet CNN (per-frame) → 2-layer LSTM (hidden=1024) → 2-class classifier.
+
+    Confirmed shapes from RuntimeError:
+        lstm.weight_ih_l1   (2048, 1024)   → input_size=1024 (== hidden from l0)
+        classifier.1.weight (256,  1024)   → Linear(1024 → 256)
+        classifier.4.weight (2,    256)    → Linear(256  → 2)
+    """
+    import torch.nn as nn
+
+    try:
+        import timm
+        cnn     = timm.create_model(
+            "efficientnet_b4", pretrained=False, num_classes=0, global_pool="avg"
+        )
+        cnn_out = cnn.num_features   # 1792 for B4
+    except ImportError:
+        from torchvision.models import efficientnet_b4
+        _tv     = efficientnet_b4(weights=None)
+        cnn_out = _tv.classifier[1].in_features
+        cnn     = nn.Sequential(*list(_tv.children())[:-1], nn.Flatten(1))
+
+    lstm = nn.LSTM(
+        input_size=cnn_out,
+        hidden_size=LSTM_HIDDEN,      # 512
+        num_layers=LSTM_LAYERS,       # 2
+        batch_first=True,
+        bidirectional=LSTM_BIDIR,     # True → output dim = 2*512 = 1024
+    )
+
+    # classifier.1 input = 2*hidden (bidirectional) = 1024
+    # confirmed from prev error: classifier.1.weight shape (256, 1024)
+    lstm_out_size = LSTM_HIDDEN * (2 if LSTM_BIDIR else 1)   # 1024
+
+    # 2 output classes: index-0 = real, index-1 = fake
+    classifier = nn.Sequential(
+        nn.Dropout(p=0.4),
+        nn.Linear(lstm_out_size, 256),
+        nn.ReLU(inplace=True),
+        nn.Dropout(p=0.3),
+        nn.Linear(256, 2),
+    )
+
+    class _Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cnn        = cnn        # key prefix matches saved state dict
+            self.lstm       = lstm
+            self.classifier = classifier
+
+        def forward(self, x):
+            """x : (B, T, C, H, W)  →  probs (B, 2)"""
+            import torch
+            B, T, C, H, W = x.shape
+            feats = self.cnn(x.view(B * T, C, H, W))    # (B*T, cnn_out)
+            if feats.dim() > 2:
+                feats = feats.mean(dim=[2, 3])
+            feats      = feats.view(B, T, -1)            # (B, T, cnn_out)
+            out, _     = self.lstm(feats)                # (B, T, 2*hidden) bidirectional
+            # Take last timestep — contains both forward and backward context
+            last       = out[:, -1, :]                   # (B, 2*hidden=1024)
+            logits     = self.classifier(last)           # (B, 2)
+            return torch.softmax(logits, dim=1)          # (B, 2)
+
+    return _Net()
 
 
-def _sample_video_frames(video_path: str, frame_count: int) -> List[Image.Image]:
+# ---------------------------------------------------------------------------
+# Load & cache
+# ---------------------------------------------------------------------------
+def _load_model():
+    global _model, _device
+    if _model is not None:
+        return _model, _device
+
+    import torch
+
+    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Video model not found at '{MODEL_PATH}'. "
+            "Place video_model_celebdf.pth inside ml/models/"
+        )
+
+    logger.info("[video_inference] Loading model from %s on %s", MODEL_PATH, _device)
+
+    net = _build_model()
+
+    import numpy as np
+    safe_globals = [np.core.multiarray.scalar, np.dtype, np.ndarray]
+    try:
+        with torch.serialization.safe_globals(safe_globals):
+            state = torch.load(MODEL_PATH, map_location=_device, weights_only=True)
+    except Exception:
+        logger.warning("[video_inference] safe_globals path failed; loading with weights_only=False")
+        state = torch.load(MODEL_PATH, map_location=_device, weights_only=False)
+
+    # Unwrap training checkpoint — confirmed key is 'model_state_dict'
+    if isinstance(state, dict):
+        for wrapper_key in ("model_state_dict", "state_dict", "model", "net"):
+            if wrapper_key in state:
+                logger.info("[video_inference] Unwrapping checkpoint key: '%s'", wrapper_key)
+                state = state[wrapper_key]
+                break
+
+    # Strip DataParallel 'module.' prefix if present
+    state = {k.replace("module.", ""): v for k, v in state.items()}
+
+    load_result = net.load_state_dict(state, strict=False)
+    if load_result.missing_keys:
+        logger.warning("[video_inference] Missing keys (first 5): %s", load_result.missing_keys[:5])
+    if load_result.unexpected_keys:
+        logger.warning("[video_inference] Unexpected keys (first 5): %s", load_result.unexpected_keys[:5])
+
+    net.to(_device).eval()
+    _model = net
+    logger.info("[video_inference] Model ready.")
+    return _model, _device
+
+
+# ---------------------------------------------------------------------------
+# Frame extraction
+# ---------------------------------------------------------------------------
+def _extract_frames(video_path: str, n: int = NUM_FRAMES) -> List[np.ndarray]:
+    """Sample n evenly-spaced RGB frames from a video using OpenCV."""
+    import cv2
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise ModelSetupError("Could not open the uploaded video file.")
+        raise IOError(f"Cannot open video: {video_path}")
 
-    try:
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        frames = []
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total <= 0:
+        raise ValueError("Video reports zero frames — it may be corrupt or unsupported.")
 
-        if total_frames > 0:
-            indices = np.linspace(0, max(total_frames - 1, 0), frame_count, dtype=int)
-            for index in indices:
-                frame = _read_frame_at(cap, int(index))
-                if frame is not None:
-                    frames.append(frame)
+    indices = np.linspace(0, total - 1, n, dtype=int)
+    frames: List[np.ndarray] = []
 
-        if not frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            while len(frames) < frame_count:
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                frames.append(frame)
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        ok, frame = cap.read()
+        if ok:
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-        if not frames:
-            raise ModelSetupError("No readable frames were found in the uploaded video.")
+    cap.release()
 
-        while len(frames) < frame_count:
-            frames.append(frames[-1].copy())
+    if not frames:
+        raise ValueError("Could not read any frames from the video.")
 
-        return [
-            Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            for frame in frames[:frame_count]
-        ]
-    finally:
-        cap.release()
+    while len(frames) < n:
+        frames.append(frames[-1])
+
+    return frames[:n]
 
 
-def _normalize_cam(cam):
-    cam = torch.relu(cam)
-    cam_min = cam.min()
-    cam_max = cam.max()
-    if float(cam_max - cam_min) <= 1e-8:
-        return torch.zeros_like(cam)
-    return (cam - cam_min) / (cam_max - cam_min)
+# ---------------------------------------------------------------------------
+# Pre-processing
+# ---------------------------------------------------------------------------
+def _preprocess_frames(frames: List[np.ndarray]):
+    """Return a (1, T, 3, H, W) float32 tensor ready for the model."""
+    import torch
+    from PIL import Image
+
+    tensors = []
+    for frame in frames:
+        img = Image.fromarray(frame).resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
+        arr = np.array(img, dtype=np.float32) / 255.0
+        arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
+        tensors.append(torch.from_numpy(arr).permute(2, 0, 1))   # (3, H, W)
+
+    return torch.stack(tensors, dim=0).unsqueeze(0)              # (1, T, 3, H, W)
 
 
-def _predict_with_gradcam(model, batch):
-    activations = []
-    gradients = []
-
-    def forward_hook(_module, _inputs, output):
-        activations.append(output)
-
-    def backward_hook(_module, _grad_input, grad_output):
-        gradients.append(grad_output[0])
-
-    target_layer = model.cnn.conv_head
-    forward_handle = target_layer.register_forward_hook(forward_hook)
-    backward_handle = target_layer.register_full_backward_hook(backward_hook)
-
-    try:
-        model.zero_grad(set_to_none=True)
-
-        with torch.enable_grad():
-            logits = model(batch)
-            predicted_index = int(logits.argmax(dim=1).item())
-            logits[0, predicted_index].backward()
-
-        if not activations or not gradients:
-            return logits.detach(), None
-
-        activation = activations[-1].detach()
-        gradient = gradients[-1].detach()
-        weights = gradient.mean(dim=(2, 3), keepdim=True)
-        cams = (weights * activation).sum(dim=1)
-        cams = torch.stack([_normalize_cam(cam) for cam in cams], dim=0)
-        return logits.detach(), cams.cpu().numpy()
-    finally:
-        forward_handle.remove()
-        backward_handle.remove()
-        model.zero_grad(set_to_none=True)
-
-
-def _predict_without_gradcam(model, batch):
-    with torch.no_grad():
-        return model(batch), None
-
-
-def _overlay_frame(frame: Image.Image, cam: np.ndarray) -> Image.Image:
-    image_size = model_input_size()
-    resample = getattr(Image, "Resampling", Image).BICUBIC
-    square_frame = ImageOps.fit(frame.convert("RGB"), (image_size, image_size), method=resample)
-    cam_resized = cv2.resize(cam, (image_size, image_size))
-    heatmap = cv2.applyColorMap(np.uint8(255 * cam_resized), cv2.COLORMAP_JET)
-    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-    base = np.asarray(square_frame, dtype=np.uint8)
-    overlay = cv2.addWeighted(base, 0.55, heatmap, 0.45, 0)
-    return Image.fromarray(overlay)
-
-
-def _save_gradcam_contact_sheet(
-    frames: List[Image.Image],
-    cams: np.ndarray,
-    source_path: str,
-) -> str | None:
-    if cams is None or len(frames) == 0:
-        return None
-
-    max_frames = min(env_int("VIDEO_HEATMAP_FRAMES", 8), len(frames), len(cams))
-    if max_frames <= 0:
-        return None
-
-    selected_indices = np.linspace(0, len(frames) - 1, max_frames, dtype=int)
-    cell_size = model_input_size()
-    caption_height = 26
-    columns = min(4, max_frames)
-    rows = int(np.ceil(max_frames / columns))
-    sheet = Image.new(
-        "RGB",
-        (columns * cell_size, rows * (cell_size + caption_height)),
-        (12, 16, 24),
-    )
-    draw = ImageDraw.Draw(sheet)
-
-    for position, frame_index in enumerate(selected_indices):
-        row = position // columns
-        column = position % columns
-        x = column * cell_size
-        y = row * (cell_size + caption_height)
-        overlay = _overlay_frame(frames[int(frame_index)], cams[int(frame_index)])
-        sheet.paste(overlay, (x, y))
-        draw.rectangle(
-            (x, y + cell_size, x + cell_size, y + cell_size + caption_height),
-            fill=(12, 16, 24),
-        )
-        draw.text(
-            (x + 8, y + cell_size + 6),
-            f"Frame {int(frame_index) + 1}",
-            fill=(235, 241, 245),
-        )
-
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    source_stem = Path(source_path).stem or "video"
-    output_name = f"{source_stem}-{uuid4().hex[:12]}-video-gradcam.jpg"
-    output_path = RESULTS_DIR / output_name
-    sheet.save(output_path, quality=90)
-    return f"/results/{output_name}"
-
-
+# ---------------------------------------------------------------------------
+# Public API  (matches existing stub signature exactly)
+# ---------------------------------------------------------------------------
 def analyze_video(video_path: str) -> Dict[str, Union[str, float, int, None]]:
-    model, device = load_video_model()
-    frame_count = video_frame_count()
-    frames = _sample_video_frames(video_path, frame_count)
-    frame_tensors = [preprocess_pil_image(frame) for frame in frames]
-    batch = torch.stack(frame_tensors, dim=0).unsqueeze(0).to(device)
+    """
+    Run deepfake detection on a video file.
 
-    heatmap_url = None
-    if env_bool("GENERATE_VIDEO_HEATMAPS", True):
-        try:
-            logits, cams = _predict_with_gradcam(model, batch)
-            if cams is not None:
-                heatmap_url = _save_gradcam_contact_sheet(frames, cams, video_path)
-        except Exception:
-            logits, heatmap_url = _predict_without_gradcam(model, batch)
-    else:
-        logits, heatmap_url = _predict_without_gradcam(model, batch)
+    Returns dict compatible with AnalysisResponse:
+        media_type, label, confidence, frames_analyzed, explanation, heatmap_url
+    """
+    try:
+        import torch
 
-    return prediction_payload(
-        logits,
-        media_type="video",
-        fake_index_env="VIDEO_FAKE_CLASS_INDEX",
-        extra={
-            "frames_analyzed": len(frames),
-            "heatmap_url": heatmap_url,
-            "xai_method": "Grad-CAM" if heatmap_url else None,
-        },
-    )
+        model, device = _load_model()
+
+        frames = _extract_frames(video_path, NUM_FRAMES)
+        clip   = _preprocess_frames(frames).to(device)    # (1, T, 3, H, W)
+
+        with torch.no_grad():
+            probs     = model(clip)           # (1, 2)
+            fake_prob = probs[0, 1].item()    # probability of class "fake"
+
+        is_fake         = fake_prob >= 0.5
+        label           = LABELS[1] if is_fake else LABELS[0]
+        confidence      = round((fake_prob if is_fake else 1.0 - fake_prob) * 100, 2)
+        frames_analyzed = len(frames)
+
+        explanation = (
+            f"EfficientNet-CNN + LSTM video model (trained on CelebDF) analysed "
+            f"{frames_analyzed} evenly-spaced frames and assigned a deepfake "
+            f"probability of {fake_prob:.1%}. "
+            + (
+                "Temporal inconsistencies and facial manipulation artifacts were "
+                "detected across multiple frames."
+                if is_fake else
+                "No significant manipulation artifacts were found across the "
+                "sampled frames; the video appears authentic."
+            )
+        )
+
+        return {
+            "media_type":      "video",
+            "label":           label,
+            "confidence":      confidence,
+            "frames_analyzed": frames_analyzed,
+            "explanation":     explanation,
+            "heatmap_url":     None,
+        }
+
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        logger.exception("[video_inference] Inference failed for %s", video_path)
+        raise RuntimeError(f"Video analysis failed: {exc}") from exc

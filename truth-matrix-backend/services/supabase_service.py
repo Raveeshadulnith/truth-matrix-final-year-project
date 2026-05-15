@@ -1,29 +1,19 @@
 ﻿import os
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-ENV_PATH = BASE_DIR / ".env"
-
-load_dotenv(ENV_PATH, override=True, encoding="utf-8-sig")
+load_dotenv()
 
 _service_client: Optional[Client] = None
 _auth_client: Optional[Client] = None
 
 
 def _require_env(name: str) -> str:
-    value = (os.getenv(name) or "").strip()
+    value = os.getenv(name)
     if not value:
-        raise RuntimeError(f"{name} is missing in {ENV_PATH}")
-
-    if name == "SUPABASE_URL" and "supabase.co" not in value:
-        raise RuntimeError(
-            "SUPABASE_URL must look like https://YOUR_PROJECT_REF.supabase.co"
-        )
-
+        raise RuntimeError(f"{name} is missing in backend .env")
     return value
 
 

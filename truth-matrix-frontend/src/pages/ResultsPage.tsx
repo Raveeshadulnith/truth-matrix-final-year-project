@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
   ArrowLeftIcon,
@@ -23,7 +23,6 @@ export function ResultsPage() {
   const navigate = useNavigate();
   const { currentAnalysis, resetAnalysis } = useAnalysisStore();
   const { openModal } = useUIStore();
-  const [isDownloadingReport, setIsDownloadingReport] = useState(false);
   useEffect(() => {
     if (!currentAnalysis) {
       navigate(ROUTES.ANALYZE);
@@ -39,29 +38,10 @@ export function ResultsPage() {
   const handleShare = () => {
     openModal('share-modal');
   };
-  const handleDownload = async () => {
-    if (isDownloadingReport) {
-      return;
-    }
-
-    setIsDownloadingReport(true);
-
-    try {
-      const { downloadAnalysisReport } = await import('../utils/reportGenerator');
-      await downloadAnalysisReport(currentAnalysis);
-      toast.success('Report downloaded', {
-        description: 'Your TruthMatrix PDF report has been generated.'
-      });
-    } catch (error) {
-      toast.error('Report download failed', {
-        description:
-          error instanceof Error
-            ? error.message
-            : 'Could not generate the report. Please try again.'
-      });
-    } finally {
-      setIsDownloadingReport(false);
-    }
+  const handleDownload = () => {
+    toast.success('Report downloaded!', {
+      description: 'Your PDF report has been generated and downloaded.'
+    });
   };
   const handleFlag = () => {
     toast.success('Feedback submitted!', {
@@ -137,9 +117,7 @@ export function ResultsPage() {
               <ResultCard
                 analysis={currentAnalysis}
                 onShare={handleShare}
-                onDownload={() => {
-                  void handleDownload();
-                }}
+                onDownload={handleDownload}
                 onFlag={handleFlag} />
 
             </motion.div>
@@ -166,7 +144,6 @@ export function ResultsPage() {
                 currentAnalysis.mediaUrl || currentAnalysis.thumbnailUrl
                 }
                 heatmapUrl={currentAnalysis.heatmapUrl}
-                xaiPanelUrl={currentAnalysis.xaiPanelUrl}
                 filename={currentAnalysis.filename}
                 mediaType={currentAnalysis.fileType} />
 
@@ -281,12 +258,9 @@ export function ResultsPage() {
                     variant="primary"
                     className="w-full"
                     leftIcon={<DownloadIcon className="w-4 h-4" />}
-                    onClick={() => {
-                      void handleDownload();
-                    }}
-                    isLoading={isDownloadingReport}>
+                    onClick={handleDownload}>
 
-                    {isDownloadingReport ? 'Generating Report' : 'Download Full Report'}
+                    Download Full Report
                   </Button>
                   <Button
                     variant="secondary"

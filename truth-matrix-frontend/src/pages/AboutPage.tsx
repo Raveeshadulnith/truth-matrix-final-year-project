@@ -62,10 +62,10 @@ export function AboutPage() {
               Our AI Model
             </h3>
             <p className="text-gray-600 dark:text-gray-400">
-              We use your trained EfficientNet-B4 image checkpoint and an
-              EfficientNet-B4 plus bidirectional LSTM video checkpoint. Image
-              analysis returns a Grad-CAM overlay, and video analysis returns a
-              Grad-CAM frame sheet showing which regions influenced the decision.
+              We utilize a fine-tuned XceptionNet architecture, trained on
+              massive datasets including FaceForensics++ and Celeb-DF. Our model
+              doesn't just give a score; it uses Grad-CAM to generate heatmaps
+              explaining exactly *why* it made its decision.
             </p>
           </Card>
           <Card variant="glass" className="p-8">

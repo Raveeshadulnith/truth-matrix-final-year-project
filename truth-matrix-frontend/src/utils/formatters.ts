@@ -43,7 +43,7 @@ export function formatProcessingTime(seconds: number): string {
 
 export function truncateFilename(
 filename: string,
-maxLength = 30)
+maxLength: number = 30)
 : string {
   if (filename.length <= maxLength) return filename;
 

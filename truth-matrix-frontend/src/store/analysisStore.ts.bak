@@ -31,9 +31,6 @@ export interface Analysis {
   createdAt: string;
   isPublic: boolean;
   shareToken?: string;
-  // ── Fields populated by the real ML models ──────────────────────────────
-  explanation?: string;        // model explanation text
-  framesAnalyzed?: number;     // video model: how many frames were sampled
 }
 
 export interface Artifact {
@@ -153,20 +150,6 @@ function mapBackendAnalysis(
   const fakeProb = result === 'fake' ? confidence : 100 - confidence;
   const realProb = result === 'real' ? confidence : 100 - confidence;
 
-  // ── Pull model-provided explanation & frames_analyzed ─────────────────────
-  const explanation: string | undefined =
-    ('explanation' in backendAnalysis ? backendAnalysis.explanation : undefined) ||
-    (savedRecord && 'explanation' in savedRecord ? (savedRecord as any).explanation : undefined) ||
-    undefined;
-
-  const framesAnalyzed: number | undefined =
-    ('frames_analyzed' in backendAnalysis
-      ? (backendAnalysis.frames_analyzed ?? undefined)
-      : undefined) ||
-    (savedRecord && 'frames_analyzed' in savedRecord
-      ? ((savedRecord as any).frames_analyzed ?? undefined)
-      : undefined);
-
   return {
     id:
       savedRecord?.id ||
@@ -193,9 +176,6 @@ function mapBackendAnalysis(
     artifacts: [],
     createdAt: savedRecord?.created_at || new Date().toISOString(),
     isPublic: false,
-    // ── Real model fields ──────────────────────────────────────────────────
-    explanation,
-    framesAnalyzed,
   };
 }
 

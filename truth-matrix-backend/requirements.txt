@@ -11,6 +11,3 @@ supabase
 PyJWT
 requests
 email-validator
-torch
-torchvision
-timm
