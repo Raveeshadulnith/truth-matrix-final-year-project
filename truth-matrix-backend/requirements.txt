@@ -14,3 +14,5 @@ email-validator
 torch
 torchvision
 timm
+transformers
+safetensors

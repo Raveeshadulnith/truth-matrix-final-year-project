@@ -91,6 +91,27 @@ def _overlay(cam_hw: np.ndarray, img_rgb: np.ndarray) -> np.ndarray:
     return np.uint8(0.45 * heat_rgb + 0.55 * img_rgb)
 
 
+def _heatmap_rgb(cam_hw: np.ndarray, img_rgb: np.ndarray) -> np.ndarray:
+    """
+    Resize a normalized saliency/CAM map to image dimensions and return a pure
+    JET heatmap as RGB uint8.
+    """
+    h, w = img_rgb.shape[:2]
+    cam_r = cv2.resize(cam_hw, (w, h), interpolation=cv2.INTER_LINEAR)
+    heat_bgr = cv2.applyColorMap(np.uint8(255 * cam_r), cv2.COLORMAP_JET)
+    return cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB)
+
+
+def _normalise_map(cam_hw: np.ndarray) -> np.ndarray:
+    cam = np.nan_to_num(cam_hw.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    cam = np.maximum(cam, 0.0)
+    lo = float(cam.min())
+    hi = float(cam.max())
+    if hi - lo < 1e-8:
+        return np.zeros_like(cam, dtype=np.float32)
+    return (cam - lo) / (hi - lo)
+
+
 # ---------------------------------------------------------------------------
 # Target-layer discovery
 # ---------------------------------------------------------------------------
@@ -180,6 +201,71 @@ def generate_image_heatmap(
 
     except Exception:
         logger.warning("[xai] image GradCAM failed", exc_info=True)
+        return None
+
+
+def generate_siglip_image_xai(
+    model,
+    processor,
+    device,
+    image_path: str,
+    class_idx: int,
+) -> Optional[dict]:
+    """
+    Generate a saliency heatmap for a Hugging Face SigLIP image classifier.
+
+    SigLIP does not expose the EfficientNet activation layer used by the
+    project Grad-CAM helper, so this uses input-gradient saliency. The returned
+    images are resized to the original image dimensions, which keeps frontend
+    overlay alignment correct.
+    """
+    import torch
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(image_path) as image:
+            pil = ImageOps.exif_transpose(image).convert("RGB")
+        img_rgb = np.array(pil, dtype=np.uint8)
+
+        inputs = processor(images=pil, return_tensors="pt")
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        pixel_values = inputs.get("pixel_values")
+        if pixel_values is None:
+            raise RuntimeError("processor did not return pixel_values")
+
+        pixel_values.requires_grad_(True)
+        inputs["pixel_values"] = pixel_values
+
+        model.eval()
+        model.zero_grad(set_to_none=True)
+        outputs = model(**inputs)
+        score = outputs.logits[0, int(class_idx)]
+        score.backward()
+
+        gradients = pixel_values.grad
+        if gradients is None:
+            raise RuntimeError("no input gradients were produced")
+
+        # Mean absolute gradient across RGB channels gives one saliency value
+        # per processed image pixel.
+        saliency = gradients.detach().abs().mean(dim=1)[0].cpu().numpy()
+        saliency = cv2.GaussianBlur(saliency, (0, 0), sigmaX=1.2)
+        saliency = _normalise_map(saliency)
+
+        heatmap_rgb = _heatmap_rgb(saliency, img_rgb)
+        overlay_rgb = _overlay(saliency, img_rgb)
+        map_strength = float(np.clip(saliency.mean() * 100.0, 0.0, 100.0))
+
+        model.zero_grad(set_to_none=True)
+        return {
+            "heatmap_rgb": heatmap_rgb,
+            "overlay_rgb": overlay_rgb,
+            "target_layer": "input_pixel_gradients",
+            "map_strength": round(map_strength, 2),
+        }
+
+    except Exception:
+        logger.warning("[xai] SigLIP image saliency failed", exc_info=True)
         return None
 
 

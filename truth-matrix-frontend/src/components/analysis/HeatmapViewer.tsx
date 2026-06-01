@@ -12,6 +12,7 @@ import { Button } from '../common/Button';
 interface HeatmapViewerProps {
   originalUrl: string;
   heatmapUrl?: string;
+  xaiOverlayUrl?: string;
   xaiPanelUrl?: string;
   filename: string;
   mediaType?: 'image' | 'video' | 'audio';
@@ -19,6 +20,7 @@ interface HeatmapViewerProps {
 export function HeatmapViewer({
   originalUrl,
   heatmapUrl,
+  xaiOverlayUrl,
   xaiPanelUrl,
   filename,
   mediaType = 'image'
@@ -29,7 +31,9 @@ export function HeatmapViewer({
   const [overlayOpacity, setOverlayOpacity] = useState(50);
   const [zoom, setZoom] = useState(100);
   const isImage = mediaType === 'image';
-  const supportsHeatmap = mediaType !== 'audio' && Boolean(heatmapUrl);
+  const primaryXaiUrl = heatmapUrl || xaiOverlayUrl;
+  const overlayUrl = xaiOverlayUrl || heatmapUrl;
+  const supportsHeatmap = mediaType !== 'audio' && Boolean(primaryXaiUrl);
   const availableViewModes = useMemo(() => {
     const originalMode = {
       id: 'original' as const,
@@ -68,7 +72,7 @@ export function HeatmapViewer({
     }
   }, [availableViewModes, viewMode]);
 
-  const sharedMediaClassName = 'max-w-full max-h-[350px] object-contain rounded-lg shadow-lg';
+  const sharedMediaClassName = 'max-h-full max-w-full object-contain rounded-lg shadow-lg';
 
   const renderOriginalMedia = () => {
     if (!originalUrl) {
@@ -147,17 +151,15 @@ export function HeatmapViewer({
 
     );
   };
-  const renderHeatmapMedia = () => {
-    const sourceUrl = viewMode === 'panel' && xaiPanelUrl ? xaiPanelUrl : heatmapUrl;
-
+  const renderHeatmapMedia = (sourceUrl?: string) => {
     if (!sourceUrl) {
       return null;
     }
 
     return (
-      <motion.img
+        <motion.img
         src={sourceUrl}
-        alt={`${filename} Grad-CAM heatmap`}
+        alt={`${filename} XAI visualization`}
         className={sharedMediaClassName}
         initial={{
           opacity: 0
@@ -176,18 +178,24 @@ export function HeatmapViewer({
     const url =
       viewMode === 'panel' && xaiPanelUrl
         ? xaiPanelUrl
-        : viewMode !== 'original' && heatmapUrl
-          ? heatmapUrl
+        : viewMode === 'overlay' && overlayUrl
+          ? overlayUrl
+          : viewMode !== 'original' && primaryXaiUrl
+          ? primaryXaiUrl
           : originalUrl;
     if (url) {
       window.open(url, '_blank', 'noopener,noreferrer');
     }
   };
 
-  const showOriginalMedia = viewMode === 'original' || viewMode === 'overlay';
+  const showOriginalMedia =
+    viewMode === 'original' || (viewMode === 'overlay' && !xaiOverlayUrl);
   const showStandaloneHeatmap =
     supportsHeatmap && (viewMode === 'heatmap' || viewMode === 'panel');
-  const showImageOverlay = isImage && supportsHeatmap && viewMode === 'overlay';
+  const showPrecomputedOverlay = isImage && Boolean(xaiOverlayUrl) && viewMode === 'overlay';
+  const showImageOverlay = isImage && supportsHeatmap && viewMode === 'overlay' && !xaiOverlayUrl;
+  const standaloneXaiUrl =
+    viewMode === 'panel' && xaiPanelUrl ? xaiPanelUrl : primaryXaiUrl;
 
   return (
     <div className="rounded-2xl border border-gray-200 dark:border-navy-700 overflow-hidden bg-white dark:bg-navy-800">
@@ -213,7 +221,7 @@ export function HeatmapViewer({
         {/* Controls */}
         <div className="flex items-center gap-4">
           {/* Opacity Slider (only for overlay mode) */}
-          {viewMode === 'overlay' && supportsHeatmap &&
+          {viewMode === 'overlay' && supportsHeatmap && !xaiOverlayUrl &&
           <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500 dark:text-gray-400">
                 Opacity
@@ -269,27 +277,29 @@ export function HeatmapViewer({
       <div
         className="relative overflow-auto bg-gray-100 dark:bg-navy-900"
         style={{
-          height: '400px'
+          height: mediaType === 'image' ? 'min(70vh, 620px)' : '400px',
+          minHeight: mediaType === 'image' ? '420px' : undefined
         }}>
 
         <div
-          className="absolute inset-0 flex items-center justify-center p-4"
+          className="absolute inset-0 flex items-center justify-center p-6 sm:p-8"
           style={{
             transform: `scale(${zoom / 100})`,
             transformOrigin: 'center'
           }}>
 
-          <div className="relative">
+          <div className="relative flex h-full w-full items-center justify-center">
             {/* Original Media */}
             {showOriginalMedia && renderOriginalMedia()}
-            {showStandaloneHeatmap && renderHeatmapMedia()}
+            {showStandaloneHeatmap && renderHeatmapMedia(standaloneXaiUrl)}
+            {showPrecomputedOverlay && renderHeatmapMedia(xaiOverlayUrl)}
 
             {/* Heatmap Overlay */}
             {showImageOverlay &&
             <motion.img
               src={heatmapUrl}
               alt={`${filename} heatmap`}
-              className={`absolute inset-0 h-full w-full rounded-lg object-contain ${viewMode === 'overlay' ? 'mix-blend-multiply' : ''}`}
+              className="absolute inset-0 h-full w-full rounded-lg object-contain mix-blend-multiply"
               initial={{
                 opacity: 0
               }}
@@ -318,13 +328,13 @@ export function HeatmapViewer({
 
       {mediaType === 'image' && supportsHeatmap &&
       <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
-          The Heatmap view shows the Grad-CAM regions returned by the backend. Overlay blends the heatmap with the original image.
+          The Heatmap view shows the XAI regions returned by the backend. Overlay blends the heatmap with the original image.
         </div>
       }
 
       {mediaType !== 'audio' && !supportsHeatmap &&
       <div className="border-t border-gray-200 bg-amber-50/70 px-4 py-3 text-sm text-amber-800 dark:border-navy-700 dark:bg-amber-500/10 dark:text-amber-200">
-          No Grad-CAM heatmap was returned for this analysis. Try reanalyzing after confirming XAI is enabled in the backend.
+          No XAI heatmap was returned for this analysis. Try reanalyzing after confirming XAI is enabled in the backend.
         </div>
       }
 

@@ -1,15 +1,14 @@
 """
-Image deepfake inference — EfficientNet-B4 + 2-class classifier head.
+Image deepfake inference using the local Hugging Face SigLIP checkpoint.
 
-Confirmed architecture (from size-mismatch errors in loading):
-    backbone.*                               ← EfficientNet-B4 feature extractor
-    classifier.1  Linear(1792 → 256)
-    classifier.4  Linear(256  → 2)          ← 2-class output [real, fake]
+Model bundle:
+    ml/models/config.json
+    ml/models/preprocessor_config.json
+    ml/models/model.safetensors
 
-Output: softmax([real_score, fake_score]) — index 1 is the deepfake probability.
-
-Model file location:
-    truth-matrix-backend/ml/models/image_model.pth
+The local config defines labels as:
+    0 -> Fake
+    1 -> Real
 """
 
 from __future__ import annotations
@@ -17,225 +16,259 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Union
-
-import numpy as np
+from typing import Any, Dict, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-MODEL_PATH = Path(__file__).resolve().parent / "models" / "image_model.pth"
+MODEL_DIR = Path(
+    os.getenv(
+        "IMAGE_HF_MODEL_DIR",
+        str(Path(__file__).resolve().parent / "models"),
+    )
+)
 
 LABELS = ["Authentic", "Suspected Deepfake"]
-IMAGE_SIZE = 224
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+DEFAULT_FAKE_THRESHOLD = 0.70
 
-# Lazy singletons
-_model  = None
+_model = None
+_processor = None
 _device = None
+_fake_index = None
+_real_index = None
 
 
-def _fake_class_index() -> int:
-    # The backup configuration used class 0 for the image checkpoint's fake class.
-    configured = os.getenv("IMAGE_FAKE_CLASS_INDEX", "0").strip()
-    try:
-        value = int(configured)
-    except ValueError as exc:
-        raise RuntimeError("IMAGE_FAKE_CLASS_INDEX must be 0 or 1") from exc
-
-    if value not in (0, 1):
-        raise RuntimeError("IMAGE_FAKE_CLASS_INDEX must be 0 or 1")
-
-    return value
+def _normalise_label(label: Any) -> str:
+    return str(label or "").strip().lower().replace("_", " ")
 
 
-# ---------------------------------------------------------------------------
-# Model definition  (must match checkpoint shapes exactly)
-# ---------------------------------------------------------------------------
-def _build_model():
-    """
-    EfficientNet-B4 backbone + 2-class classifier head.
+def _resolve_label_indices(config) -> Tuple[int, int]:
+    id2label = getattr(config, "id2label", {}) or {}
+    label_lookup = {
+        _normalise_label(label): int(index) for index, label in id2label.items()
+    }
 
-    Confirmed shapes from RuntimeError:
-        classifier.1.weight  (256, in_features)   ← Linear(in_features → 256)
-        classifier.4.weight  (2,   256)            ← Linear(256 → 2)
-    """
-    import torch.nn as nn
+    fake_index = label_lookup.get("fake")
+    real_index = label_lookup.get("real")
 
-    try:
-        import timm
-        backbone    = timm.create_model(
-            "efficientnet_b4", pretrained=False, num_classes=0, global_pool="avg"
+    if fake_index is None:
+        fake_index = label_lookup.get("deepfake", label_lookup.get("manipulated"))
+    if real_index is None:
+        real_index = label_lookup.get("authentic", label_lookup.get("genuine"))
+
+    if fake_index is None or real_index is None:
+        logger.warning(
+            "[image_inference] Could not infer label ids from config id2label=%s; "
+            "falling back to Fake=0, Real=1",
+            id2label,
         )
-        in_features = backbone.num_features   # 1792 for B4
-    except ImportError:
-        from torchvision.models import efficientnet_b4
-        _tv         = efficientnet_b4(weights=None)
-        in_features = _tv.classifier[1].in_features
-        backbone    = nn.Sequential(*list(_tv.children())[:-1], nn.Flatten(1))
+        fake_index, real_index = 0, 1
 
-    # 2 output classes: index-0 = real, index-1 = fake
-    classifier = nn.Sequential(
-        nn.Dropout(p=0.4),
-        nn.Linear(in_features, 256),
-        nn.ReLU(inplace=True),
-        nn.Dropout(p=0.3),
-        nn.Linear(256, 2),
-    )
-
-    class _Net(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.backbone   = backbone
-            self.classifier = classifier
-
-        def forward(self, x):
-            import torch
-            feats = self.backbone(x)
-            if feats.dim() > 2:
-                feats = feats.mean(dim=[2, 3])
-            logits = self.classifier(feats)          # (B, 2)
-            probs  = torch.softmax(logits, dim=1)    # (B, 2)
-            return probs                             # caller uses [:, 1] for fake prob
-
-    return _Net()
+    return int(fake_index), int(real_index)
 
 
-# ---------------------------------------------------------------------------
-# Load & cache
-# ---------------------------------------------------------------------------
+def _fake_threshold() -> float:
+    configured = os.getenv("IMAGE_FAKE_THRESHOLD", str(DEFAULT_FAKE_THRESHOLD)).strip()
+    try:
+        threshold = float(configured)
+    except ValueError:
+        logger.warning(
+            "[image_inference] Invalid IMAGE_FAKE_THRESHOLD=%r; using %.2f",
+            configured,
+            DEFAULT_FAKE_THRESHOLD,
+        )
+        return DEFAULT_FAKE_THRESHOLD
+
+    if not 0.50 <= threshold <= 0.95:
+        logger.warning(
+            "[image_inference] IMAGE_FAKE_THRESHOLD must be between 0.50 and 0.95; "
+            "using %.2f",
+            DEFAULT_FAKE_THRESHOLD,
+        )
+        return DEFAULT_FAKE_THRESHOLD
+
+    return threshold
+
+
+def _calibrate_fake_probability(raw_fake_prob: float, threshold: float) -> float:
+    """
+    Map the model's raw fake score onto a calibrated 0..1 display probability.
+
+    The chosen threshold becomes the 50% decision point. This prevents a weak
+    fake lean, such as 0.52, from being presented as a confident fake verdict.
+    """
+    raw_fake_prob = max(0.0, min(1.0, raw_fake_prob))
+
+    if raw_fake_prob < threshold:
+        return 0.5 * (raw_fake_prob / threshold)
+
+    remaining = max(1e-8, 1.0 - threshold)
+    return 0.5 + 0.5 * ((raw_fake_prob - threshold) / remaining)
+
+
 def _load_model():
-    global _model, _device
-    if _model is not None:
-        return _model, _device
+    global _model, _processor, _device, _fake_index, _real_index
+
+    if _model is not None and _processor is not None:
+        return _model, _processor, _device, _fake_index, _real_index
 
     import torch
+    from transformers import AutoImageProcessor, AutoModelForImageClassification
+    from transformers.utils import logging as transformers_logging
+
+    transformers_logging.set_verbosity_error()
+    try:
+        transformers_logging.disable_progress_bar()
+    except AttributeError:
+        pass
+
+    required_files = ("config.json", "preprocessor_config.json", "model.safetensors")
+    missing_files = [name for name in required_files if not (MODEL_DIR / name).exists()]
+    if missing_files:
+        missing = ", ".join(missing_files)
+        raise FileNotFoundError(
+            f"Image model bundle is incomplete in '{MODEL_DIR}'. Missing: {missing}"
+        )
 
     _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("[image_inference] Loading SigLIP model from %s on %s", MODEL_DIR, _device)
 
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"Image model not found at '{MODEL_PATH}'. "
-            "Place image_model.pth inside ml/models/"
+    _processor = AutoImageProcessor.from_pretrained(
+        MODEL_DIR,
+        local_files_only=True,
+    )
+    _model = AutoModelForImageClassification.from_pretrained(
+        MODEL_DIR,
+        local_files_only=True,
+    )
+    _model.to(_device).eval()
+
+    _fake_index, _real_index = _resolve_label_indices(_model.config)
+
+    logger.info(
+        "[image_inference] SigLIP model ready. fake_index=%s real_index=%s",
+        _fake_index,
+        _real_index,
+    )
+    return _model, _processor, _device, _fake_index, _real_index
+
+
+def _open_rgb_image(image_path: str):
+    from PIL import Image, ImageOps
+
+    with Image.open(image_path) as image:
+        return ImageOps.exif_transpose(image).convert("RGB")
+
+
+def _predict_probabilities(image_path: str) -> Tuple[float, float]:
+    import torch
+
+    model, processor, device, fake_index, real_index = _load_model()
+    image = _open_rgb_image(image_path)
+    inputs = processor(images=image, return_tensors="pt")
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+        probs = torch.softmax(outputs.logits, dim=-1)[0]
+
+    fake_prob = float(probs[fake_index].detach().cpu().item())
+    real_prob = float(probs[real_index].detach().cpu().item())
+    total = fake_prob + real_prob
+
+    if total > 0:
+        fake_prob /= total
+        real_prob /= total
+
+    return fake_prob, real_prob
+
+
+def _build_explanation(fake_prob: float, is_fake: bool, threshold: float) -> str:
+    if is_fake:
+        return (
+            "The local SigLIP image classification model detected visual patterns "
+            "associated with manipulated imagery. After threshold calibration, it "
+            f"assigned a deepfake probability of {fake_prob:.1%} using a "
+            f"{threshold:.0%} fake-decision threshold. Review the highlighted XAI "
+            "regions before trusting or sharing the image."
         )
 
-    logger.info("[image_inference] Loading model from %s on %s", MODEL_PATH, _device)
-
-    net = _build_model()
-
-    # These checkpoints contain numpy scalars — need safe_globals or weights_only=False
-    import numpy as np
-    safe_globals = [np.core.multiarray.scalar, np.dtype, np.ndarray]
-    try:
-        with torch.serialization.safe_globals(safe_globals):
-            state = torch.load(MODEL_PATH, map_location=_device, weights_only=True)
-    except Exception:
-        logger.warning("[image_inference] safe_globals path failed; loading with weights_only=False")
-        state = torch.load(MODEL_PATH, map_location=_device, weights_only=False)
-
-    # Unwrap training checkpoint — confirmed key is 'model_state_dict'
-    if isinstance(state, dict):
-        for wrapper_key in ("model_state_dict", "state_dict", "model", "net"):
-            if wrapper_key in state:
-                logger.info("[image_inference] Unwrapping checkpoint key: '%s'", wrapper_key)
-                state = state[wrapper_key]
-                break
-
-    # Strip DataParallel 'module.' prefix if present
-    state = {k.replace("module.", ""): v for k, v in state.items()}
-
-    load_result = net.load_state_dict(state, strict=False)
-    if load_result.missing_keys:
-        logger.warning("[image_inference] Missing keys (first 5): %s", load_result.missing_keys[:5])
-    if load_result.unexpected_keys:
-        logger.warning("[image_inference] Unexpected keys (first 5): %s", load_result.unexpected_keys[:5])
-
-    net.to(_device).eval()
-    _model = net
-    logger.info("[image_inference] Model ready.")
-    return _model, _device
+    return (
+        "The local SigLIP image classification model did not find strong visual "
+        "manipulation signals. After threshold calibration, it assigned a deepfake "
+        f"probability of {fake_prob:.1%} using a {threshold:.0%} fake-decision "
+        "threshold. The image is classified as authentic by the model."
+    )
 
 
-# ---------------------------------------------------------------------------
-# Pre-processing
-# ---------------------------------------------------------------------------
-def _preprocess(image_path: str):
-    """Load an image and return a (1, 3, H, W) float32 tensor."""
-    import torch
-    from PIL import Image
-
-    img    = Image.open(image_path).convert("RGB")
-    img    = img.resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
-    arr    = np.array(img, dtype=np.float32) / 255.0
-    arr    = (arr - IMAGENET_MEAN) / IMAGENET_STD
-    tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)   # (1, 3, H, W)
-    return tensor
-
-
-# ---------------------------------------------------------------------------
-# Public API  (matches existing stub signature exactly)
-# ---------------------------------------------------------------------------
 def analyze_image(image_path: str) -> Dict[str, Union[str, float, None]]:
     """
-    Run deepfake detection on a single image file.
-
-    Returns dict compatible with AnalysisResponse:
-        media_type, label, confidence, explanation, heatmap_url
+    Run image deepfake detection and return a response compatible with
+    schemas.response_schema.AnalysisResponse.
     """
     try:
-        import torch
+        model, processor, device, fake_index, real_index = _load_model()
+        raw_fake_prob, _raw_authentic_prob = _predict_probabilities(image_path)
+        threshold = _fake_threshold()
+        fake_prob = _calibrate_fake_probability(raw_fake_prob, threshold)
+        authentic_prob = 1.0 - fake_prob
 
-        model, device = _load_model()
-        tensor = _preprocess(image_path).to(device)
-
-        with torch.no_grad():
-            probs    = model(tensor)          # (1, 2)
-            fake_index = _fake_class_index()
-            authentic_index = 1 - fake_index
-            fake_prob = probs[0, fake_index].item()
-            authentic_prob = probs[0, authentic_index].item()
-
-        is_fake    = fake_prob >= 0.5
-        label      = LABELS[1] if is_fake else LABELS[0]
+        is_fake = raw_fake_prob >= threshold
+        label = LABELS[1] if is_fake else LABELS[0]
         confidence = round((fake_prob if is_fake else authentic_prob) * 100, 2)
-        class_idx  = fake_index if is_fake else authentic_index
+        target_index = fake_index if is_fake else real_index
+        target_class = "Fake" if is_fake else "Real"
 
-        explanation = (
-            f"EfficientNet-B4 image model assigned a deepfake probability of "
-            f"{fake_prob:.1%}. "
-            + (
-                "Facial manipulation artifacts or GAN-generated patterns were "
-                "detected in the image."
-                if is_fake else
-                "No significant manipulation artifacts were detected; "
-                "the image appears authentic."
-            )
-        )
-
-        # GradCAM heatmap (best-effort — failure here never blocks the result)
         heatmap_url = None
+        overlay_url = None
+        xai_layer = None
+        xai_map_strength = None
+        xai_error = None
+
         try:
-            from ml.xai import generate_image_heatmap, save_heatmap_result
-            heatmap_rgb = generate_image_heatmap(model, device, image_path, class_idx)
-            if heatmap_rgb is not None:
+            from ml.xai import generate_siglip_image_xai, save_heatmap_result
+
+            xai_result = generate_siglip_image_xai(
+                model=model,
+                processor=processor,
+                device=device,
+                image_path=image_path,
+                class_idx=target_index,
+            )
+
+            if xai_result:
                 heatmap_url = save_heatmap_result(
-                    heatmap_rgb, image_path, "image-gradcam"
+                    xai_result["heatmap_rgb"],
+                    image_path,
+                    "siglip-heatmap",
                 )
-        except Exception:
-            logger.warning("[image_inference] GradCAM skipped", exc_info=True)
+                overlay_url = save_heatmap_result(
+                    xai_result["overlay_rgb"],
+                    image_path,
+                    "siglip-overlay",
+                )
+                xai_layer = xai_result.get("target_layer")
+                xai_map_strength = xai_result.get("map_strength")
+            else:
+                xai_error = "SigLIP saliency did not return a heatmap."
+        except Exception as exc:
+            xai_error = str(exc)
+            logger.warning("[image_inference] SigLIP XAI skipped", exc_info=True)
 
         return {
-            "media_type":   "image",
-            "label":        label,
-            "confidence":   confidence,
+            "media_type": "image",
+            "label": label,
+            "confidence": confidence,
             "fake_probability": round(fake_prob * 100, 2),
             "authentic_probability": round(authentic_prob * 100, 2),
-            "explanation":  explanation,
-            "heatmap_url":  heatmap_url,
-            "xai_method": "Grad-CAM" if heatmap_url else None,
+            "explanation": _build_explanation(fake_prob, is_fake, threshold),
+            "heatmap_url": heatmap_url,
+            "xai_overlay_url": overlay_url,
+            "xai_method": "Gradient Saliency" if heatmap_url else None,
+            "xai_target_class": target_class,
+            "xai_predicted_class": target_class,
+            "xai_layer": xai_layer,
+            "xai_map_strength": xai_map_strength,
+            "xai_error": xai_error,
         }
 
     except FileNotFoundError:

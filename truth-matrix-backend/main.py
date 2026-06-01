@@ -342,6 +342,42 @@ async def analyze_image_endpoint(
     )
 
 
+@app.post("/api/analyze/image-public", response_model=AnalysisResponse)
+async def analyze_public_image_endpoint(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Unauthenticated image upload endpoint for the browser extension.
+
+    It does not upload to Firebase or save into Supabase history; it only saves
+    a temporary local file, runs the image model, and returns the same response
+    shape as the authenticated image endpoint.
+    """
+    original_filename = file.filename or "extension-image.jpg"
+
+    if not validate_extension(original_filename, IMAGE_EXTENSIONS):
+        await file.close()
+        allowed = ", ".join(sorted(IMAGE_EXTENSIONS))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type. Allowed extensions: {allowed}",
+        )
+
+    temp_path = _create_temp_upload_path(original_filename)
+
+    try:
+        await save_upload_file(file, temp_path)
+        analysis_result = analyze_image(str(temp_path))
+        analysis_result["original_filename"] = original_filename
+        return analysis_result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Image analysis failed: {exc}",
+        ) from exc
+    finally:
+        remove_file_if_exists(temp_path)
+
+
 @app.post("/api/analyze/video", response_model=AnalysisResponse)
 async def analyze_video_endpoint(
     file: UploadFile = File(...),

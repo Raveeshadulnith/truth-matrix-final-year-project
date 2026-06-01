@@ -162,10 +162,12 @@ export function ResultsPage() {
                 Explainable AI Visualization
               </h2>
               <HeatmapViewer
+                key={currentAnalysis.id}
                 originalUrl={
                 currentAnalysis.mediaUrl || currentAnalysis.thumbnailUrl
                 }
                 heatmapUrl={currentAnalysis.heatmapUrl}
+                xaiOverlayUrl={currentAnalysis.xaiOverlayUrl}
                 xaiPanelUrl={currentAnalysis.xaiPanelUrl}
                 filename={currentAnalysis.filename}
                 mediaType={currentAnalysis.fileType} />

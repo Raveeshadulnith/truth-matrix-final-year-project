@@ -47,7 +47,7 @@ export function AnalysisPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { startUpload } = useAnalysisStore();
-  const [mediaType, setMediaType] = useState('image');
+  const [mediaType, setMediaType] = useState('video');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');

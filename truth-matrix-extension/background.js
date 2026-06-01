@@ -1,5 +1,6 @@
 ﻿const API_BASE_URL = 'http://127.0.0.1:8000';
 const IMAGE_URL_ENDPOINT = `${API_BASE_URL}/api/analyze/image-url`;
+const IMAGE_PUBLIC_ENDPOINT = `${API_BASE_URL}/api/analyze/image-public`;
 const CONTEXT_MENU_ID = 'truth-matrix-verify-image';
 const STORAGE_KEY = 'truthMatrixAnalysisState';
 const HISTORY_KEY = 'truthMatrixAnalysisHistory';
@@ -68,6 +69,32 @@ async function readResponseBody(response) {
   return response.text();
 }
 
+function extensionFromContentType(contentType) {
+  const cleanType = String(contentType || '').split(';', 1)[0].trim().toLowerCase();
+
+  if (cleanType === 'image/png') return 'png';
+  if (cleanType === 'image/webp') return 'webp';
+  if (cleanType === 'image/jpeg' || cleanType === 'image/jpg') return 'jpg';
+
+  return 'jpg';
+}
+
+function filenameFromImageUrl(imageUrl, contentType) {
+  try {
+    const url = new URL(imageUrl);
+    const lastSegment = url.pathname.split('/').filter(Boolean).pop() || '';
+    const cleanName = lastSegment.split('?')[0].replace(/[^\w.-]/g, '_');
+
+    if (/\.(jpe?g|png|webp)$/i.test(cleanName)) {
+      return cleanName;
+    }
+  } catch {
+    // Use a generated filename below.
+  }
+
+  return `truth-matrix-image.${extensionFromContentType(contentType)}`;
+}
+
 function showNotification(title, message) {
   chrome.notifications.create({
     type: 'basic',
@@ -75,6 +102,62 @@ function showNotification(title, message) {
     title,
     message,
   });
+}
+
+async function requestImageUrlAnalysis(imageUrl) {
+  const response = await fetch(IMAGE_URL_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ image_url: imageUrl }),
+  });
+
+  const data = await readResponseBody(response);
+
+  if (!response.ok) {
+    throw new Error(
+      getErrorMessage(data, 'Truth Matrix analysis failed. Please try again.')
+    );
+  }
+
+  return data;
+}
+
+async function requestImageUploadAnalysis(imageUrl) {
+  const imageResponse = await fetch(imageUrl, {
+    credentials: 'include',
+    cache: 'no-store',
+  });
+
+  if (!imageResponse.ok) {
+    throw new Error(`Could not fetch image in browser: HTTP ${imageResponse.status}`);
+  }
+
+  const blob = await imageResponse.blob();
+  const contentType = blob.type || imageResponse.headers.get('content-type') || '';
+
+  if (contentType && !contentType.toLowerCase().startsWith('image/')) {
+    throw new Error('Selected URL did not return an image.');
+  }
+
+  const formData = new FormData();
+  formData.append('file', blob, filenameFromImageUrl(imageUrl, contentType));
+
+  const response = await fetch(IMAGE_PUBLIC_ENDPOINT, {
+    method: 'POST',
+    body: formData,
+  });
+
+  const data = await readResponseBody(response);
+
+  if (!response.ok) {
+    throw new Error(
+      getErrorMessage(data, 'Truth Matrix upload analysis failed. Please try again.')
+    );
+  }
+
+  return data;
 }
 
 async function analyzeImageUrl(imageUrl) {
@@ -89,20 +172,18 @@ async function analyzeImageUrl(imageUrl) {
   });
 
   try {
-    const response = await fetch(IMAGE_URL_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ image_url: imageUrl }),
-    });
+    let data;
 
-    const data = await readResponseBody(response);
-
-    if (!response.ok) {
-      throw new Error(
-        getErrorMessage(data, 'Truth Matrix analysis failed. Please try again.')
-      );
+    try {
+      data = await requestImageUrlAnalysis(imageUrl);
+    } catch (urlError) {
+      data = await requestImageUploadAnalysis(imageUrl).catch((uploadError) => {
+        const primaryMessage =
+          urlError instanceof Error ? urlError.message : String(urlError);
+        const fallbackMessage =
+          uploadError instanceof Error ? uploadError.message : String(uploadError);
+        throw new Error(`${primaryMessage} Upload fallback failed: ${fallbackMessage}`);
+      });
     }
 
     const completedAt = new Date().toISOString();
