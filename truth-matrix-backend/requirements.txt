@@ -1,4 +1,4 @@
-﻿fastapi
+fastapi
 uvicorn
 python-multipart
 pillow
@@ -6,7 +6,6 @@ opencv-python
 numpy
 python-dotenv
 pydantic
-firebase-admin
 supabase
 PyJWT
 requests
@@ -16,3 +15,6 @@ torchvision
 timm
 transformers
 safetensors
+truthscan-image-detector-client
+h5py
+keras

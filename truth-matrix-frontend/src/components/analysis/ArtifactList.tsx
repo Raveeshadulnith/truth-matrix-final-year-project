@@ -21,7 +21,7 @@ const artifactIcons: Record<string, React.ElementType> = {
   audio_visual_mismatch: VolumeXIcon,
   gan_artifact: SparklesIcon,
   visual_manipulation_signal: AlertTriangleIcon,
-  temporal_manipulation_signal: AlertTriangleIcon,
+  frame_manipulation_signal: AlertTriangleIcon,
   gradcam_heatmap: LayersIcon,
   gradcam_frame_heatmap: LayersIcon,
   uncertain_model_signal: AlertTriangleIcon,

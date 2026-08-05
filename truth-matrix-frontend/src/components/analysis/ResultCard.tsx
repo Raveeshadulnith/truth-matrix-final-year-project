@@ -23,15 +23,14 @@ interface ResultCardProps {
   onDownload?: () => void;
   onFlag?: () => void;
 }
-
-// ── Model display metadata ────────────────────────────────────────────────────
+// -- Model display metadata ----------------------------------------------------
 const MODEL_INFO: Record<string, { name: string; Icon: React.ElementType }> = {
   image: { name: 'EfficientNet-B4 Image Model', Icon: ImageIcon },
-  video: { name: 'EfficientNet+LSTM (CelebDF)', Icon: VideoIcon },
+  video: { name: 'Keras .h5 Frame CNN', Icon: VideoIcon },
   audio: { name: 'Audio Deepfake Model',        Icon: MicIcon },
 };
 
-// ── Result display config ─────────────────────────────────────────────────────
+// -- Result display config -----------------------------------------------------
 const RESULT_CONFIG = {
   fake: {
     icon: ShieldAlertIcon,
@@ -92,7 +91,7 @@ export function ResultCard({
       animate={{ opacity: 1, y: 0 }}
       className={`rounded-2xl border-2 ${config.borderColor} ${config.bgColor} overflow-hidden`}
     >
-      {/* ── Result Header ───────────────────────────────────────────────── */}
+      {/* -- Result Header ------------------------------------------------- */}
       <div className={`p-6 ${config.bgColor}`}>
         <motion.div
           initial={{ scale: 0.8 }}
@@ -112,7 +111,7 @@ export function ResultCard({
         </motion.div>
       </div>
 
-      {/* ── Confidence Section ──────────────────────────────────────────── */}
+      {/* -- Confidence Section -------------------------------------------- */}
       <div className="p-6 bg-white dark:bg-navy-800 border-t border-gray-200 dark:border-navy-700">
         <div className="flex flex-col lg:flex-row items-center gap-8">
           {/* Gauge */}
@@ -174,7 +173,7 @@ export function ResultCard({
               </div>
             </div>
 
-            {/* ── Model badges (live, from real model data) ────────────── */}
+            {/* -- Model badges (live, from real model data) -------------- */}
             <div className="flex flex-wrap gap-2 pt-4">
               {/* Model name badge */}
               <Badge variant="info" size="sm">
@@ -182,16 +181,18 @@ export function ResultCard({
                 {modelInfo.name}
               </Badge>
 
-              {/* Frames analysed badge — only for video */}
-              {analysis.fileType === 'video' && (analysis as any).framesAnalyzed != null && (
+              {/* Frames analysed badge - only for video */}
+              {analysis.fileType === 'video' && analysis.framesAnalyzed != null && (
                 <Badge variant="default" size="sm">
-                  {(analysis as any).framesAnalyzed} frames analysed
+                  {analysis.framesAnalyzed} frames analysed
                 </Badge>
               )}
 
-              <Badge variant={analysis.heatmapUrl ? 'default' : 'warning'} size="sm">
-                {xaiBadge}
-              </Badge>
+              {analysis.fileType !== 'video' && (
+                <Badge variant={analysis.heatmapUrl ? 'default' : 'warning'} size="sm">
+                  {xaiBadge}
+                </Badge>
+              )}
 
               {/* High-confidence warning */}
               {isFake && analysis.confidence >= 80 && (
@@ -201,17 +202,17 @@ export function ResultCard({
               )}
             </div>
 
-            {/* ── Explanation from the model ───────────────────────────── */}
-            {(analysis as any).explanation && (
+            {/* -- Explanation from the model ----------------------------- */}
+            {analysis.explanation && (
               <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed pt-2 border-t border-gray-100 dark:border-navy-700">
-                {(analysis as any).explanation}
+                {analysis.explanation}
               </p>
             )}
           </div>
         </div>
       </div>
 
-      {/* ── Actions ─────────────────────────────────────────────────────── */}
+      {/* -- Actions ------------------------------------------------------- */}
       <div className="p-6 bg-gray-50 dark:bg-navy-900/50 border-t border-gray-200 dark:border-navy-700">
         <div className="flex flex-wrap items-center justify-center gap-3">
           <Button

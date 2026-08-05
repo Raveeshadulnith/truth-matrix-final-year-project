@@ -1,17 +1,12 @@
 """
-Grad-CAM (Gradient-weighted Class Activation Mapping) for Truth Matrix models.
+Grad-CAM (Gradient-weighted Class Activation Mapping) for the image model.
 
-Supported models:
-  Image model  — hook target: model.backbone.act2
-  Video model  — hook target: model.cnn.act2
-
-Both are the EfficientNet-B4 (timm) SiLU activation that outputs
+The EfficientNet-B4 (timm) SiLU activation outputs
 (B, 1792, 7, 7) spatial feature maps *before* global average pooling.
 A torchvision fallback hooks the last block in backbone.features instead.
 
 Public API:
     generate_image_heatmap(model, device, image_path, class_idx) -> np.ndarray | None
-    generate_video_heatmap(model, device, frames, class_idx)     -> np.ndarray | None
     save_heatmap(heatmap_rgb)                                    -> str (temp file path)
 """
 
@@ -20,7 +15,7 @@ from __future__ import annotations
 import logging
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 from uuid import uuid4
 
 import cv2
@@ -115,16 +110,16 @@ def _normalise_map(cam_hw: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Target-layer discovery
 # ---------------------------------------------------------------------------
-def _target_layer(model, model_type: str):
+def _target_layer(model):
     """
     Return the last spatial activation layer of the EfficientNet-B4 backbone.
 
-    timm path  : model.backbone.act2  (image)  |  model.cnn.act2  (video)
+    timm path  : model.backbone.act2
                  → output (B, 1792, 7, 7) for 224×224 input
-    tv fallback: last block in model.backbone[0] / model.cnn[0]
+    tv fallback: last block in model.backbone[0]
                  (features[-1] of torchvision EfficientNet-B4)
     """
-    base = model.backbone if model_type == "image" else model.cnn
+    base = model.backbone
 
     for attr_name in ("conv_head", "bn2"):
         layer = getattr(base, attr_name, None)
@@ -144,7 +139,7 @@ def _target_layer(model, model_type: str):
         return list(base.children())[0][-1]   # features[-1]
     except Exception as exc:
         raise RuntimeError(
-            f"[xai] Cannot locate GradCAM target layer for {model_type} model: {exc}"
+            f"[xai] Cannot locate GradCAM target layer for image model: {exc}"
         ) from exc
 
 
@@ -180,7 +175,7 @@ def generate_image_heatmap(
         arr    = (arr - _MEAN) / _STD
         tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device)
 
-        layer = _target_layer(model, "image")
+        layer = _target_layer(model)
         hooks = _Hooks(layer)
 
         try:
@@ -266,85 +261,6 @@ def generate_siglip_image_xai(
 
     except Exception:
         logger.warning("[xai] SigLIP image saliency failed", exc_info=True)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Video GradCAM — 4×4 grid of per-frame heatmaps
-# ---------------------------------------------------------------------------
-def generate_video_heatmap(
-    model,
-    device,
-    frames: List[np.ndarray],
-    class_idx: int,
-    image_size: int = 224,
-    thumb_size: int = 112,
-) -> Optional[np.ndarray]:
-    """
-    Per-frame GradCAM for a video clip, displayed as a grid image.
-
-    A single forward+backward pass captures (B*T, C, H, W) activations and
-    gradients at model.cnn.act2, giving one map per frame.
-
-    Layout: 4 columns × ceil(T/4) rows, each cell thumb_size × thumb_size.
-    Returns (rows*thumb_size, cols*thumb_size, 3) uint8 RGB, or None on failure.
-    """
-    import torch
-    from PIL import Image
-
-    try:
-        T = len(frames)
-        tensors, frame_rgbs = [], []
-
-        for frame in frames:
-            pil = Image.fromarray(frame).resize(
-                (image_size, image_size), Image.BILINEAR
-            )
-            rgb = np.array(pil, dtype=np.uint8)
-            frame_rgbs.append(rgb)
-            arr = rgb.astype(np.float32) / 255.0
-            arr = (arr - _MEAN) / _STD
-            tensors.append(torch.from_numpy(arr).permute(2, 0, 1))
-
-        # (1, T, 3, H, W)
-        clip = torch.stack(tensors).unsqueeze(0).to(device)
-
-        layer = _target_layer(model, "video")
-        hooks = _Hooks(layer)
-
-        try:
-            model.eval()
-            probs = model(clip)            # (1, 2) — hooks fire on cnn.act2
-            model.zero_grad()
-            probs[0, class_idx].backward()
-        finally:
-            hooks.remove()
-            model.zero_grad()
-
-        if hooks.activations is None or hooks.gradients is None:
-            logger.warning("[xai] video: hooks captured nothing")
-            return None
-
-        acts  = hooks.activations   # (T, C, 7, 7)
-        grads = hooks.gradients     # (T, C, 7, 7)
-
-        # Build 4-column grid
-        cols = 4
-        rows = (T + cols - 1) // cols
-        grid = np.zeros((rows * thumb_size, cols * thumb_size, 3), dtype=np.uint8)
-
-        for t in range(T):
-            cam_t  = _cam(acts[t], grads[t])
-            thumb  = cv2.resize(frame_rgbs[t], (thumb_size, thumb_size))
-            cell   = _overlay(cam_t, thumb)
-            r, c   = divmod(t, cols)
-            grid[r * thumb_size:(r + 1) * thumb_size,
-                 c * thumb_size:(c + 1) * thumb_size] = cell
-
-        return grid
-
-    except Exception:
-        logger.warning("[xai] video GradCAM failed", exc_info=True)
         return None
 
 

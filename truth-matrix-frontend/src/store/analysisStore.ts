@@ -11,6 +11,7 @@ import {
   getAnalysisResults,
   type BackendAnalysisRecord,
   type BackendAnalysisResponse,
+  type VideoMetadata,
 } from '../api/deepfakeApi';
 import { useAuthStore } from './authStore';
 
@@ -39,9 +40,9 @@ export interface Analysis {
   createdAt: string;
   isPublic: boolean;
   shareToken?: string;
-  // ── Fields populated by the real ML models ──────────────────────────────
-  explanation?: string;        // model explanation text
-  framesAnalyzed?: number;     // video model: how many frames were sampled
+  explanation?: string;
+  framesAnalyzed?: number;
+  videoMetadata?: VideoMetadata;
 }
 
 export interface Artifact {
@@ -153,7 +154,7 @@ function buildArtifacts(input: {
       id: 'model_manipulation_signal',
       type:
         input.mediaType === 'video'
-          ? 'temporal_manipulation_signal'
+          ? 'frame_manipulation_signal'
           : 'visual_manipulation_signal',
       confidence: input.fakeProb,
       location:
@@ -162,33 +163,27 @@ function buildArtifacts(input: {
           : 'grad_cam_attention_regions',
       description:
         input.mediaType === 'video'
-          ? `The trained video model found manipulation signals across sampled frames with ${input.fakeProb.toFixed(1)}% deepfake probability.`
+          ? `The Keras video model found manipulation signals after averaging sampled frame predictions with ${input.fakeProb.toFixed(1)}% deepfake probability.`
           : `The trained image model found manipulation signals in the Grad-CAM attention regions with ${input.fakeProb.toFixed(1)}% deepfake probability.`,
     });
   }
 
-  if (input.heatmapUrl) {
+  if (input.mediaType === 'image' && input.heatmapUrl) {
     artifacts.push({
       id: 'xai_gradcam_heatmap',
-      type: input.mediaType === 'video' ? 'gradcam_frame_heatmap' : 'gradcam_heatmap',
+      type: 'gradcam_heatmap',
       confidence:
         input.result === 'fake'
           ? input.fakeProb
           : input.result === 'real'
             ? input.realProb
             : input.confidence,
-      location:
-        input.mediaType === 'video'
-          ? `${input.framesAnalyzed || 'sampled'}_video_frames`
-          : 'image_attention_map',
-      description:
-        input.mediaType === 'video'
-          ? `${method} generated a frame contact sheet showing which sampled video regions influenced the model decision.`
-          : `${method} generated an image heatmap for the ${targetText} class using ${input.xaiLayer || 'the configured model layer'}.`,
+      location: 'image_attention_map',
+      description: `${method} generated an image heatmap for the ${targetText} class using ${input.xaiLayer || 'the configured model layer'}.`,
     });
   }
 
-  if (!input.heatmapUrl && input.xaiError) {
+  if (input.mediaType === 'image' && !input.heatmapUrl && input.xaiError) {
     artifacts.push({
       id: 'xai_generation_error',
       type: 'xai_generation_error',
@@ -232,11 +227,15 @@ function mapBackendAnalysis(
       ('confidence' in backendAnalysis ? backendAnalysis.confidence : 0)
   );
   const result = resultFromLabel(label);
-  const mediaUrl = resolveBackendUrl(
-    options.sourceUrl ||
-      savedRecord?.firebase_url ||
-      ('firebase_url' in backendAnalysis ? backendAnalysis.firebase_url : null)
-  );
+  const mediaUrl = options.file
+    ? URL.createObjectURL(options.file)
+    : resolveBackendUrl(
+        options.sourceUrl ||
+          savedRecord?.local_url ||
+          ('local_url' in backendAnalysis ? backendAnalysis.local_url : null) ||
+          savedRecord?.firebase_url ||
+          ('firebase_url' in backendAnalysis ? backendAnalysis.firebase_url : null)
+      );
   const heatmapUrl = resolveBackendUrl(
     savedRecord?.heatmap_url ||
       ('heatmap_url' in backendAnalysis ? backendAnalysis.heatmap_url : null)
@@ -296,7 +295,7 @@ function mapBackendAnalysis(
   const boundedFakeProb = Math.max(0, Math.min(100, fakeProb));
   const boundedRealProb = Math.max(0, Math.min(100, realProb));
 
-  // ── Pull model-provided explanation & frames_analyzed ─────────────────────
+  // -- Pull model-provided explanation & frames_analyzed ---------------------
   const explanation: string | undefined =
     ('explanation' in backendAnalysis ? backendAnalysis.explanation : undefined) ||
     (savedRecord && 'explanation' in savedRecord ? (savedRecord as any).explanation : undefined) ||
@@ -309,6 +308,10 @@ function mapBackendAnalysis(
     (savedRecord && 'frames_analyzed' in savedRecord
       ? ((savedRecord as any).frames_analyzed ?? undefined)
       : undefined);
+  const videoMetadata =
+    'video_metadata' in backendAnalysis
+      ? backendAnalysis.video_metadata || undefined
+      : undefined;
   const artifacts = buildArtifacts({
     mediaType,
     result,
@@ -357,9 +360,10 @@ function mapBackendAnalysis(
     artifacts,
     createdAt: savedRecord?.created_at || new Date().toISOString(),
     isPublic: false,
-    // ── Real model fields ──────────────────────────────────────────────────
+    // -- Real model fields --------------------------------------------------
     explanation,
     framesAnalyzed,
+    videoMetadata,
   };
 }
 

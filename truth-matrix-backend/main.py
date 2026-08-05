@@ -2,6 +2,7 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
+from shutil import copy2
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from auth.auth_dependency import get_current_user
 from auth.auth_service import (
@@ -22,7 +24,7 @@ from auth.auth_service import (
 )
 from ml.audio_inference import analyze_audio
 from ml.image_inference import analyze_image
-from ml.video_inference import analyze_video
+from ml.video_inference import VideoInputError, analyze_video
 from schemas.auth_schema import (
     AuthResponse,
     LoginRequest,
@@ -31,8 +33,7 @@ from schemas.auth_schema import (
     ResetPasswordRequest,
     SignupRequest,
 )
-from schemas.response_schema import AnalysisResponse, ImageUrlRequest
-from services.firebase_service import upload_file_to_firebase, upload_heatmap_to_firebase
+from schemas.response_schema import AnalysisResponse, ImageUrlRequest, VideoAnalysisResponse
 from services.supabase_service import (
     delete_analysis_result,
     get_analysis_result_by_id,
@@ -46,6 +47,7 @@ from utils.file_utils import (
     get_file_extension,
     remove_file_if_exists,
     save_upload_file,
+    UploadTooLargeError,
     validate_extension,
 )
 
@@ -62,10 +64,23 @@ IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv"}
 AUDIO_EXTENSIONS = {"wav", "mp3", "m4a"}
 MAX_REMOTE_IMAGE_BYTES = int(os.getenv("MAX_REMOTE_IMAGE_BYTES", str(15 * 1024 * 1024)))
+MAX_VIDEO_UPLOAD_BYTES = int(
+    os.getenv("MAX_VIDEO_UPLOAD_BYTES", str(100 * 1024 * 1024))
+)
+VIDEO_CONTENT_TYPES = {
+    "video/mp4",
+    "video/quicktime",
+    "video/avi",
+    "video/msvideo",
+    "video/x-ms-video",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "application/octet-stream",
+}
 
 app = FastAPI(
     title="Truth Matrix Deepfake Detection Backend",
-    description="FastAPI backend for authenticated deepfake analysis, Firebase uploads, and Supabase history.",
+    description="FastAPI backend for authenticated deepfake analysis and local file history.",
     version="1.0.0",
 )
 
@@ -89,6 +104,7 @@ app.add_middleware(
 )
 
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 def _auth_error_detail(exc: Exception) -> tuple[int, str]:
@@ -223,19 +239,31 @@ def _create_temp_upload_path(filename: str) -> Path:
     return UPLOAD_DIR / generate_temp_filename(extension)
 
 
+def _persist_local_file(source_path: Path, *, destination_dir: Path, media_type: str, filename: str) -> str:
+    destination_name = f"{media_type}_{Path(filename or 'upload.bin').name.replace(' ', '_')}"
+    destination = destination_dir / destination_name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    copy2(source_path, destination)
+    return destination_name
+
+
+def _build_local_download_url(destination_name: str, route: str) -> str:
+    return f"/{route}/{destination_name}"
+
+
 def _prepare_record(
     *,
     user_id: str,
     media_type: str,
     original_filename: str,
-    firebase_url: str,
+    local_url: Optional[str],
     analysis_result: Dict[str, Any],
 ) -> Dict[str, Any]:
     return {
         "user_id": user_id,
         "media_type": media_type,
         "original_filename": original_filename,
-        "firebase_url": firebase_url,
+        "firebase_url": local_url,
         "heatmap_url": analysis_result.get("heatmap_url"),
         "label": analysis_result["label"],
         "confidence": analysis_result["confidence"],
@@ -255,6 +283,7 @@ def _format_analysis_response(
             {
                 "id": saved_record.get("id"),
                 "firebase_url": saved_record.get("firebase_url"),
+                "local_url": saved_record.get("firebase_url"),
                 "heatmap_url": saved_record.get("heatmap_url") or analysis_result.get("heatmap_url"),
                 "original_filename": saved_record.get("original_filename"),
                 "saved_record": saved_record,
@@ -271,6 +300,8 @@ async def _analyze_upload(
     allowed_extensions: set[str],
     analyzer: Callable[[str], Dict[str, Any]],
     current_user: Dict[str, Any],
+    max_upload_bytes: Optional[int] = None,
+    allowed_content_types: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     original_filename = file.filename or "upload"
 
@@ -282,47 +313,88 @@ async def _analyze_upload(
             detail=f"Unsupported file type. Allowed extensions: {allowed}",
         )
 
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if allowed_content_types and content_type and content_type not in allowed_content_types:
+        await file.close()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The uploaded file content type does not match the selected media type.",
+        )
+
     temp_path = _create_temp_upload_path(original_filename)
 
     try:
-        await save_upload_file(file, temp_path)
-        analysis_result = analyzer(str(temp_path))
+        bytes_written = await save_upload_file(
+            file, temp_path, max_bytes=max_upload_bytes
+        )
+        if bytes_written == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The uploaded file is empty.",
+            )
 
-        # Upload GradCAM heatmap produced by the ML layer (best-effort)
+        analysis_result = await run_in_threadpool(analyzer, str(temp_path))
+        local_upload_name = _persist_local_file(
+            temp_path,
+            destination_dir=UPLOAD_DIR,
+            media_type=media_type,
+            filename=original_filename,
+        )
+        local_url = _build_local_download_url(local_upload_name, "uploads")
+        analysis_result["local_url"] = local_url
+
+        # Persist GradCAM heatmap produced by the ML layer (best-effort) locally.
         heatmap_local = analysis_result.pop("heatmap_path", None)
         if heatmap_local:
             try:
-                heatmap_url = upload_heatmap_to_firebase(
-                    heatmap_local, f"{media_type}_heatmap.png"
+                heatmap_name = _persist_local_file(
+                    Path(heatmap_local),
+                    destination_dir=RESULTS_DIR,
+                    media_type=f"{media_type}_heatmap",
+                    filename=f"{media_type}_heatmap.png",
                 )
+                heatmap_url = _build_local_download_url(heatmap_name, "results")
                 analysis_result["heatmap_url"] = heatmap_url
-                logger.info("[analyze] heatmap uploaded: %s", heatmap_url)
+                logger.info("[analyze] local heatmap saved: %s", heatmap_url)
             except Exception as exc:
-                logger.warning("[analyze] heatmap upload failed: %s", exc)
+                logger.warning("[analyze] heatmap persistence failed: %s", exc)
             finally:
                 remove_file_if_exists(heatmap_local)
 
-        firebase_url = upload_file_to_firebase(
-            str(temp_path),
-            media_type,
-            original_filename,
-        )
         saved_record = save_analysis_result(
             _prepare_record(
                 user_id=current_user["id"],
                 media_type=media_type,
                 original_filename=original_filename,
-                firebase_url=firebase_url,
+                local_url=local_url,
                 analysis_result=analysis_result,
             )
         )
         return _format_analysis_response(analysis_result, saved_record)
     except HTTPException:
         raise
+    except UploadTooLargeError as exc:
+        limit_mb = max_upload_bytes / (1024 * 1024) if max_upload_bytes else 0
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum size is {limit_mb:g} MB.",
+        ) from exc
+    except VideoInputError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except FileNotFoundError as exc:
+        logger.exception("%s model file is unavailable", media_type.capitalize())
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"{media_type.capitalize()} analysis is temporarily unavailable.",
+        ) from exc
     except Exception as exc:
+        logger.exception("%s analysis failed", media_type.capitalize())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"{media_type.capitalize()} analysis failed: {exc}",
+            detail=f"{media_type.capitalize()} analysis failed. Please try again.",
         ) from exc
     finally:
         remove_file_if_exists(temp_path)
@@ -378,7 +450,7 @@ async def analyze_public_image_endpoint(file: UploadFile = File(...)) -> Dict[st
         remove_file_if_exists(temp_path)
 
 
-@app.post("/api/analyze/video", response_model=AnalysisResponse)
+@app.post("/api/analyze/video", response_model=VideoAnalysisResponse)
 async def analyze_video_endpoint(
     file: UploadFile = File(...),
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -389,6 +461,8 @@ async def analyze_video_endpoint(
         allowed_extensions=VIDEO_EXTENSIONS,
         analyzer=analyze_video,
         current_user=current_user,
+        max_upload_bytes=MAX_VIDEO_UPLOAD_BYTES,
+        allowed_content_types=VIDEO_CONTENT_TYPES,
     )
 
 

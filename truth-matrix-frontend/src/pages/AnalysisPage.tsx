@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAnalysisStore } from '../store/analysisStore';
-import { ROUTES } from '../utils/constants';
+import { MAX_FILE_SIZE, ROUTES } from '../utils/constants';
 
 const mediaOptions = [
   {
@@ -27,19 +27,29 @@ const mediaOptions = [
 function getSelectedOption(mediaType: string) {
   return mediaOptions.find((option) => option.value === mediaType) ?? mediaOptions[0];
 }
-
-function formatTitle(value?: string) {
-  if (!value) {
-    return 'Unknown';
+function validateSelectedFile(file: File, mediaType: string): string | null {
+  if (file.size === 0) {
+    return 'The selected file is empty.';
+  }
+  if (file.size > MAX_FILE_SIZE) {
+    return 'The selected file is larger than the 100 MB upload limit.';
   }
 
-  return value.charAt(0).toUpperCase() + value.slice(1);
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  const allowedExtensions: Record<string, string[]> = {
+    image: ['jpg', 'jpeg', 'png', 'webp'],
+    video: ['mp4', 'mov', 'avi', 'mkv'],
+    audio: ['wav', 'mp3', 'm4a'],
+  };
+  if (!extension || !allowedExtensions[mediaType]?.includes(extension)) {
+    return `Choose a supported ${mediaType} file.`;
+  }
+  return null;
 }
 
-// ── Model names shown in the inline result preview ───────────────────────────
 const MODEL_NAMES: Record<string, string> = {
   image: 'EfficientNet-B4',
-  video: 'EfficientNet+LSTM (CelebDF)',
+  video: 'Keras .h5 Frame CNN',
   audio: 'Audio Deepfake Model',
 };
 
@@ -87,6 +97,12 @@ export function AnalysisPage() {
       return;
     }
 
+    const validationError = validateSelectedFile(selectedFile, mediaType);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
     setIsLoading(true);
 
     try {
@@ -123,7 +139,7 @@ export function AnalysisPage() {
         </section>
 
         <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-          {/* ── Upload form ────────────────────────────────────────────────── */}
+          {/* -- Upload form -------------------------------------------------- */}
           <form
             onSubmit={handleAnalyze}
             className="rounded-3xl border border-white/70 bg-white/85 p-6 shadow-2xl shadow-cyan-950/10 backdrop-blur dark:border-cyan-400/15 dark:bg-navy-800/80 dark:shadow-black/30 sm:p-8"
@@ -199,11 +215,11 @@ export function AnalysisPage() {
               disabled={isLoading || !selectedFile}
               className="w-full rounded-2xl bg-gradient-to-r from-cyan-600 to-blue-700 px-6 py-3.5 text-base font-bold text-white shadow-lg shadow-cyan-600/25 transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-cyan-600/30 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0 dark:from-neon-cyan dark:to-neon-violet"
             >
-              {isLoading ? 'Analyzing…' : 'Analyze'}
+              {isLoading ? 'Analyzing...' : 'Analyze'}
             </button>
           </form>
 
-          {/* ── Result preview panel ────────────────────────────────────── */}
+          {/* -- Result preview panel -------------------------------------- */}
           <aside className="rounded-3xl border border-white/70 bg-white/70 p-6 shadow-2xl shadow-blue-950/10 backdrop-blur dark:border-cyan-400/15 dark:bg-navy-800/70 dark:shadow-black/30 sm:p-8">
             <div className="mb-5 flex items-center justify-between gap-4">
               <div>
@@ -229,7 +245,7 @@ export function AnalysisPage() {
                 <div className="mb-4 h-2 overflow-hidden rounded-full bg-cyan-100 dark:bg-navy-900">
                   <div className="h-full w-2/3 animate-pulse rounded-full bg-cyan-600 dark:bg-neon-cyan" />
                 </div>
-                Analyzing with {MODEL_NAMES[mediaType]}…
+                Analyzing with {MODEL_NAMES[mediaType]}...
               </div>
             )}
 
@@ -287,6 +303,22 @@ export function AnalysisPage() {
                       Frames analysed
                     </p>
                     <p className="mt-2 text-lg font-bold">{result.framesAnalyzed}</p>
+                  </div>
+                )}
+
+                {result.fileType === 'video' && result.videoMetadata && (
+                  <div className="rounded-2xl bg-slate-50 p-4 dark:bg-navy-900/80">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                      Video details
+                    </p>
+                    <p className="mt-2 text-sm text-slate-700 dark:text-slate-200">
+                      {result.videoMetadata.width && result.videoMetadata.height
+                        ? `${result.videoMetadata.width} x ${result.videoMetadata.height}`
+                        : 'Resolution unavailable'}
+                      {result.videoMetadata.duration_seconds != null
+                        ? ` | ${result.videoMetadata.duration_seconds.toFixed(1)} seconds`
+                        : ''}
+                    </p>
                   </div>
                 )}
 

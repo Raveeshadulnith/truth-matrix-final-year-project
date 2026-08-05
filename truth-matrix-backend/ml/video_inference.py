@@ -1,311 +1,415 @@
-"""
-Video deepfake inference — EfficientNet CNN + Bidirectional LSTM, trained on CelebDF.
+"""Video deepfake inference using the local Keras .h5 frame model.
 
-Confirmed architecture (mathematically derived from all RuntimeError shape messages):
-    cnn.*                                      ← EfficientNet-B4, output 1792-dim
-    lstm  hidden_size=512, num_layers=2,
-          bidirectional=True
-          weight_ih_l0 (2048, 1792) → 4×512 rows, 1792 cols  ✓
-          weight_hh_l0 (2048, 512)  → 4×512 rows, 512 cols   ✓
-          weight_ih_l1 (2048, 1024) → 4×512 rows, 2×512 cols ✓ (bidir l0 output)
-    classifier.1  Linear(1024 → 256)          ← 2*hidden input
-    classifier.4  Linear(256  → 2)            ← 2-class [real, fake]
+The configured model is:
+    ml/models/deepfake-detection-video-model1.h5
 
-Model file location:
-    truth-matrix-backend/ml/models/video_model_celebdf.pth
+This HDF5 model is a Keras Conv2D image classifier with a single sigmoid
+output. Video analysis samples frames from the uploaded video, runs the frame
+classifier on each sampled frame, aggregates the frame probabilities, and
+returns the same API contract used by the frontend.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Config  (confirmed from error messages)
-# ---------------------------------------------------------------------------
-MODEL_PATH = Path(__file__).resolve().parent / "models" / "video_model_celebdf.pth"
+# This venv uses Python 3.14, so standalone Keras is the compatible loader here.
+# Standalone Keras can run this model on the already-installed PyTorch backend.
+os.environ.setdefault("KERAS_BACKEND", os.getenv("VIDEO_KERAS_BACKEND", "torch"))
 
-LABELS      = ["Authentic", "Suspected Deepfake"]
-NUM_FRAMES  = 16
-IMAGE_SIZE  = 224
-LSTM_HIDDEN = 512    # confirmed: weight_ih_l0=(2048,1792) → 4*512=2048 rows
-LSTM_LAYERS = 2
-LSTM_BIDIR  = True   # confirmed: weight_ih_l1 cols=1024=2*512 (bidirectional l0 output)
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+MODEL_PATH = Path(
+    os.getenv(
+        "VIDEO_KERAS_MODEL_PATH",
+        str(Path(__file__).resolve().parent / "models" / "deepfake-detection-video-model1.h5"),
+    )
+)
 
-# Lazy singletons
-_model  = None
-_device = None
+LABELS = ["Authentic", "Suspected Deepfake"]
+DEFAULT_NUM_FRAMES = 16
+DEFAULT_FRAME_SIZE = 224
+DEFAULT_FAKE_THRESHOLD = 0.50
+DEFAULT_MAX_DECODE_FRAMES = 50_000
+
+_model = None
+_model_input: Optional[dict] = None
+_keras = None
+_load_lock = threading.Lock()
+_predict_lock = threading.Lock()
 
 
-def _fake_class_index() -> int:
+class VideoInputError(ValueError):
+    """Raised when an uploaded file cannot be decoded as a usable video."""
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+
+    if parsed < minimum:
+        raise RuntimeError(f"{name} must be >= {minimum}")
+    return parsed
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+
+    if not minimum <= parsed <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _fake_threshold() -> float:
+    return _env_float("VIDEO_FAKE_THRESHOLD", DEFAULT_FAKE_THRESHOLD)
+
+
+def _num_frames() -> int:
+    return _env_int("VIDEO_NUM_FRAMES", DEFAULT_NUM_FRAMES, minimum=1)
+
+
+def _default_frame_size() -> int:
+    return _env_int("VIDEO_FRAME_SIZE", DEFAULT_FRAME_SIZE, minimum=32)
+
+
+def _max_decode_frames() -> int:
+    return _env_int("VIDEO_MAX_DECODE_FRAMES", DEFAULT_MAX_DECODE_FRAMES)
+
+
+def _sigmoid_score_means_fake() -> bool:
+    configured = os.getenv("VIDEO_SIGMOID_FAKE_VALUE", "1").strip()
+    if configured not in {"0", "1"}:
+        raise RuntimeError("VIDEO_SIGMOID_FAKE_VALUE must be 0 or 1")
+    return configured == "1"
+
+
+def _fake_class_index(output_width: int) -> int:
     configured = os.getenv("VIDEO_FAKE_CLASS_INDEX", "1").strip()
     try:
         value = int(configured)
     except ValueError as exc:
-        raise RuntimeError("VIDEO_FAKE_CLASS_INDEX must be 0 or 1") from exc
+        raise RuntimeError("VIDEO_FAKE_CLASS_INDEX must be an integer") from exc
 
-    if value not in (0, 1):
-        raise RuntimeError("VIDEO_FAKE_CLASS_INDEX must be 0 or 1")
-
+    if value < 0 or value >= output_width:
+        raise RuntimeError(
+            f"VIDEO_FAKE_CLASS_INDEX must be between 0 and {output_width - 1}"
+        )
     return value
 
 
-# ---------------------------------------------------------------------------
-# Model definition  (must match checkpoint shapes exactly)
-# ---------------------------------------------------------------------------
-def _build_model():
-    """
-    EfficientNet CNN (per-frame) → 2-layer LSTM (hidden=1024) → 2-class classifier.
-
-    Confirmed shapes from RuntimeError:
-        lstm.weight_ih_l1   (2048, 1024)   → input_size=1024 (== hidden from l0)
-        classifier.1.weight (256,  1024)   → Linear(1024 → 256)
-        classifier.4.weight (2,    256)    → Linear(256  → 2)
-    """
-    import torch.nn as nn
+def _import_keras():
+    global _keras
+    if _keras is not None:
+        return _keras
 
     try:
-        import timm
-        cnn     = timm.create_model(
-            "efficientnet_b4", pretrained=False, num_classes=0, global_pool="avg"
+        import keras
+    except ImportError as exc:
+        raise RuntimeError(
+            "Keras and h5py are required to run the local .h5 video model. "
+            "Activate truth-matrix-backend/venv and run: pip install -r requirements.txt"
+        ) from exc
+
+    _keras = keras
+    return keras
+
+
+def _normalise_input_shape(input_shape) -> Tuple[Optional[int], ...]:
+    if isinstance(input_shape, list):
+        input_shape = input_shape[0]
+    return tuple(input_shape)
+
+
+def _resolve_model_input(model) -> dict:
+    input_shape = _normalise_input_shape(model.input_shape)
+    if len(input_shape) != 4:
+        raise RuntimeError(
+            f"Video Keras model must accept one image tensor, got input_shape={input_shape}"
         )
-        cnn_out = cnn.num_features   # 1792 for B4
-    except ImportError:
-        from torchvision.models import efficientnet_b4
-        _tv     = efficientnet_b4(weights=None)
-        cnn_out = _tv.classifier[1].in_features
-        cnn     = nn.Sequential(*list(_tv.children())[:-1], nn.Flatten(1))
 
-    lstm = nn.LSTM(
-        input_size=cnn_out,
-        hidden_size=LSTM_HIDDEN,      # 512
-        num_layers=LSTM_LAYERS,       # 2
-        batch_first=True,
-        bidirectional=LSTM_BIDIR,     # True → output dim = 2*512 = 1024
+    channels_first = input_shape[1] in (1, 3)
+    channels_last = input_shape[-1] in (1, 3) or (
+        input_shape[-1] is None and not channels_first
     )
+    if not channels_last and not channels_first:
+        raise RuntimeError(
+            f"Video Keras model input must have 1 or 3 channels, got input_shape={input_shape}"
+        )
 
-    # classifier.1 input = 2*hidden (bidirectional) = 1024
-    # confirmed from prev error: classifier.1.weight shape (256, 1024)
-    lstm_out_size = LSTM_HIDDEN * (2 if LSTM_BIDIR else 1)   # 1024
+    if channels_last:
+        height = input_shape[1] or _default_frame_size()
+        width = input_shape[2] or _default_frame_size()
+        channels = input_shape[3] or 3
+        data_format = "channels_last"
+    else:
+        channels = input_shape[1]
+        height = input_shape[2] or _default_frame_size()
+        width = input_shape[3] or _default_frame_size()
+        data_format = "channels_first"
 
-    # 2 output classes: index-0 = real, index-1 = fake
-    classifier = nn.Sequential(
-        nn.Dropout(p=0.4),
-        nn.Linear(lstm_out_size, 256),
-        nn.ReLU(inplace=True),
-        nn.Dropout(p=0.3),
-        nn.Linear(256, 2),
-    )
+    if channels != 3:
+        raise RuntimeError(
+            f"Video Keras model must use RGB frames with 3 channels, got {channels}"
+        )
 
-    class _Net(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.cnn        = cnn        # key prefix matches saved state dict
-            self.lstm       = lstm
-            self.classifier = classifier
-
-        def forward(self, x):
-            """x : (B, T, C, H, W)  →  probs (B, 2)"""
-            import torch
-            B, T, C, H, W = x.shape
-            feats = self.cnn(x.view(B * T, C, H, W))    # (B*T, cnn_out)
-            if feats.dim() > 2:
-                feats = feats.mean(dim=[2, 3])
-            feats      = feats.view(B, T, -1)            # (B, T, cnn_out)
-            out, _     = self.lstm(feats)                # (B, T, 2*hidden) bidirectional
-            # Take last timestep — contains both forward and backward context
-            last       = out[:, -1, :]                   # (B, 2*hidden=1024)
-            logits     = self.classifier(last)           # (B, 2)
-            return torch.softmax(logits, dim=1)          # (B, 2)
-
-    return _Net()
+    return {
+        "shape": input_shape,
+        "height": int(height),
+        "width": int(width),
+        "data_format": data_format,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Load & cache
-# ---------------------------------------------------------------------------
 def _load_model():
-    global _model, _device
-    if _model is not None:
-        return _model, _device
+    global _model, _model_input
+    if _model is not None and _model_input is not None:
+        return _model, _model_input
 
-    import torch
+    with _load_lock:
+        if _model is not None and _model_input is not None:
+            return _model, _model_input
+        if not MODEL_PATH.is_file():
+            raise FileNotFoundError(f"Video model not found at '{MODEL_PATH}'")
 
-    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        keras = _import_keras()
+        logger.info("Loading Keras video model from %s", MODEL_PATH)
+        model = keras.models.load_model(str(MODEL_PATH), compile=False)
+        model_input = _resolve_model_input(model)
 
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"Video model not found at '{MODEL_PATH}'. "
-            "Place video_model_celebdf.pth inside ml/models/"
+        warmup = np.zeros(
+            (1, model_input["height"], model_input["width"], 3),
+            dtype=np.float32,
         )
+        if model_input["data_format"] == "channels_first":
+            warmup = np.transpose(warmup, (0, 3, 1, 2))
+        model.predict(warmup, verbose=0)
 
-    logger.info("[video_inference] Loading model from %s on %s", MODEL_PATH, _device)
-
-    net = _build_model()
-
-    import numpy as np
-    safe_globals = [np.core.multiarray.scalar, np.dtype, np.ndarray]
-    try:
-        with torch.serialization.safe_globals(safe_globals):
-            state = torch.load(MODEL_PATH, map_location=_device, weights_only=True)
-    except Exception:
-        logger.warning("[video_inference] safe_globals path failed; loading with weights_only=False")
-        state = torch.load(MODEL_PATH, map_location=_device, weights_only=False)
-
-    # Unwrap training checkpoint — confirmed key is 'model_state_dict'
-    if isinstance(state, dict):
-        for wrapper_key in ("model_state_dict", "state_dict", "model", "net"):
-            if wrapper_key in state:
-                logger.info("[video_inference] Unwrapping checkpoint key: '%s'", wrapper_key)
-                state = state[wrapper_key]
-                break
-
-    # Strip DataParallel 'module.' prefix if present
-    state = {k.replace("module.", ""): v for k, v in state.items()}
-
-    load_result = net.load_state_dict(state, strict=False)
-    if load_result.missing_keys:
-        logger.warning("[video_inference] Missing keys (first 5): %s", load_result.missing_keys[:5])
-    if load_result.unexpected_keys:
-        logger.warning("[video_inference] Unexpected keys (first 5): %s", load_result.unexpected_keys[:5])
-
-    net.to(_device).eval()
-    _model = net
-    logger.info("[video_inference] Model ready.")
-    return _model, _device
+        _model = model
+        _model_input = model_input
+        logger.info(
+            "Keras video model ready: backend=%s input_shape=%s output_shape=%s",
+            os.getenv("KERAS_BACKEND"),
+            model.input_shape,
+            model.output_shape,
+        )
+        return _model, _model_input
 
 
-# ---------------------------------------------------------------------------
-# Frame extraction
-# ---------------------------------------------------------------------------
-def _extract_frames(video_path: str, n: int = NUM_FRAMES) -> List[np.ndarray]:
-    """Sample n evenly-spaced RGB frames from a video using OpenCV."""
-    import cv2
+def _read_frame_at(cap, frame_index: int) -> Optional[np.ndarray]:
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+    ok, frame = cap.read()
+    if not ok or frame is None or frame.size == 0:
+        return None
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
+def _positive_number(value: float) -> Optional[float]:
+    return float(value) if np.isfinite(value) and value > 0 else None
+
+
+def _video_metadata(cap: cv2.VideoCapture) -> Dict[str, Union[int, float, None]]:
+    fps = _positive_number(cap.get(cv2.CAP_PROP_FPS))
+    frame_count_value = _positive_number(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width_value = _positive_number(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height_value = _positive_number(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_count = int(frame_count_value) if frame_count_value else None
+    return {
+        "duration_seconds": round(frame_count / fps, 3) if frame_count and fps else None,
+        "fps": round(fps, 3) if fps else None,
+        "width": int(width_value) if width_value else None,
+        "height": int(height_value) if height_value else None,
+        "total_frames": frame_count,
+    }
+
+
+def _stream_sample_frames(
+    cap: cv2.VideoCapture, n: int
+) -> Tuple[List[np.ndarray], int]:
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    samples: List[Tuple[int, np.ndarray]] = []
+    seen = 0
+    random = np.random.default_rng(0)
+
+    while seen < _max_decode_frames():
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        if frame.size == 0:
+            continue
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if len(samples) < n:
+            samples.append((seen, rgb))
+        else:
+            replacement = int(random.integers(0, seen + 1))
+            if replacement < n:
+                samples[replacement] = (seen, rgb)
+        seen += 1
+
+    samples.sort(key=lambda item: item[0])
+    return [frame for _, frame in samples], seen
+
+
+def _extract_frames(
+    video_path: str, n: int
+) -> Tuple[List[np.ndarray], Dict[str, Union[int, float, None]]]:
+    path = Path(video_path)
+    if not path.is_file() or path.stat().st_size == 0:
+        raise VideoInputError("The uploaded video is empty or missing.")
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        raise IOError(f"Cannot open video: {video_path}")
+        cap.release()
+        raise VideoInputError("The uploaded file is not a supported or readable video.")
 
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total <= 0:
-        raise ValueError("Video reports zero frames — it may be corrupt or unsupported.")
-
-    indices = np.linspace(0, total - 1, n, dtype=int)
-    frames: List[np.ndarray] = []
-
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-        ok, frame = cap.read()
-        if ok:
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
-    cap.release()
-
-    if not frames:
-        raise ValueError("Could not read any frames from the video.")
-
-    while len(frames) < n:
-        frames.append(frames[-1])
-
-    return frames[:n]
-
-
-# ---------------------------------------------------------------------------
-# Pre-processing
-# ---------------------------------------------------------------------------
-def _preprocess_frames(frames: List[np.ndarray]):
-    """Return a (1, T, 3, H, W) float32 tensor ready for the model."""
-    import torch
-    from PIL import Image
-
-    tensors = []
-    for frame in frames:
-        img = Image.fromarray(frame).resize((IMAGE_SIZE, IMAGE_SIZE), Image.BILINEAR)
-        arr = np.array(img, dtype=np.float32) / 255.0
-        arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
-        tensors.append(torch.from_numpy(arr).permute(2, 0, 1))   # (3, H, W)
-
-    return torch.stack(tensors, dim=0).unsqueeze(0)              # (1, T, 3, H, W)
-
-
-# ---------------------------------------------------------------------------
-# Public API  (matches existing stub signature exactly)
-# ---------------------------------------------------------------------------
-def analyze_video(video_path: str) -> Dict[str, Union[str, float, int, None]]:
-    """
-    Run deepfake detection on a video file.
-
-    Returns dict compatible with AnalysisResponse:
-        media_type, label, confidence, frames_analyzed, explanation, heatmap_url
-    """
     try:
-        import torch
+        metadata = _video_metadata(cap)
+        total = metadata["total_frames"]
+        frames: List[np.ndarray] = []
 
-        model, device = _load_model()
-
-        frames = _extract_frames(video_path, NUM_FRAMES)
-        clip   = _preprocess_frames(frames).to(device)    # (1, T, 3, H, W)
-
-        with torch.no_grad():
-            probs     = model(clip)           # (1, 2)
-            fake_index = _fake_class_index()
-            authentic_index = 1 - fake_index
-            fake_prob = probs[0, fake_index].item()
-            authentic_prob = probs[0, authentic_index].item()
-
-        is_fake         = fake_prob >= 0.5
-        label           = LABELS[1] if is_fake else LABELS[0]
-        confidence      = round((fake_prob if is_fake else authentic_prob) * 100, 2)
-        frames_analyzed = len(frames)
-        class_idx       = fake_index if is_fake else authentic_index
-
-        explanation = (
-            f"EfficientNet-CNN + LSTM video model (trained on CelebDF) analysed "
-            f"{frames_analyzed} evenly-spaced frames and assigned a deepfake "
-            f"probability of {fake_prob:.1%}. "
-            + (
-                "Temporal inconsistencies and facial manipulation artifacts were "
-                "detected across multiple frames."
-                if is_fake else
-                "No significant manipulation artifacts were found across the "
-                "sampled frames; the video appears authentic."
+        if isinstance(total, int) and total > 0:
+            target_count = min(n, total)
+            indices = np.unique(
+                np.linspace(0, total - 1, target_count, dtype=int)
             )
-        )
+            for index in indices:
+                frame = _read_frame_at(cap, int(index))
+                if frame is not None:
+                    frames.append(frame)
+            if len(frames) < target_count:
+                sequential_frames, _ = _stream_sample_frames(cap, n)
+                if sequential_frames:
+                    frames = sequential_frames
 
-        # GradCAM heatmap grid (best-effort — failure never blocks the result)
-        heatmap_url = None
-        try:
-            from ml.xai import generate_video_heatmap, save_heatmap_result
-            heatmap_rgb = generate_video_heatmap(model, device, frames, class_idx)
-            if heatmap_rgb is not None:
-                heatmap_url = save_heatmap_result(
-                    heatmap_rgb, video_path, "video-gradcam"
-                )
-        except Exception:
-            logger.warning("[video_inference] GradCAM skipped", exc_info=True)
+        if not frames:
+            frames, decoded_count = _stream_sample_frames(cap, n)
+            if metadata["total_frames"] is None and decoded_count:
+                metadata["total_frames"] = decoded_count
+                fps = metadata["fps"]
+                if isinstance(fps, float):
+                    metadata["duration_seconds"] = round(decoded_count / fps, 3)
 
-        return {
-            "media_type":      "video",
-            "label":           label,
-            "confidence":      confidence,
-            "fake_probability": round(fake_prob * 100, 2),
-            "authentic_probability": round(authentic_prob * 100, 2),
-            "frames_analyzed": frames_analyzed,
-            "explanation":     explanation,
-            "heatmap_url":     heatmap_url,
-            "xai_method":      "Grad-CAM" if heatmap_url else None,
-        }
+        if not frames:
+            raise VideoInputError("No decodable frames were found in the uploaded video.")
 
-    except FileNotFoundError:
+        if metadata["width"] is None or metadata["height"] is None:
+            metadata["height"], metadata["width"] = frames[0].shape[:2]
+        return frames, metadata
+    finally:
+        cap.release()
+
+
+def _preprocess_frames(frames: List[np.ndarray], model_input: dict) -> np.ndarray:
+    resized_frames = []
+    width = model_input["width"]
+    height = model_input["height"]
+
+    for frame in frames:
+        resized = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        arr = resized.astype(np.float32) / 255.0
+        resized_frames.append(arr)
+
+    batch = np.stack(resized_frames, axis=0)
+    if model_input["data_format"] == "channels_first":
+        batch = np.transpose(batch, (0, 3, 1, 2))
+    return batch.astype(np.float32)
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    exp = np.exp(logits)
+    return exp / np.sum(exp, axis=1, keepdims=True)
+
+
+def _frame_fake_probabilities(predictions: np.ndarray, frame_count: int) -> np.ndarray:
+    preds = np.asarray(predictions, dtype=np.float32)
+
+    if preds.ndim == 0:
+        preds = preds.reshape(1, 1)
+    elif preds.ndim == 1:
+        preds = preds.reshape(-1, 1)
+    elif preds.ndim > 2:
+        preds = preds.reshape(preds.shape[0], -1)
+
+    if preds.shape[0] != frame_count:
+        if preds.size == frame_count:
+            preds = preds.reshape(frame_count, 1)
+        else:
+            raise RuntimeError(
+                f"Model returned {preds.shape[0]} predictions for {frame_count} frames"
+            )
+
+    if preds.shape[1] == 1:
+        scores = preds[:, 0]
+        if np.any(scores < 0.0) or np.any(scores > 1.0):
+            scores = 1.0 / (1.0 + np.exp(-np.clip(scores, -80.0, 80.0)))
+        if not _sigmoid_score_means_fake():
+            scores = 1.0 - scores
+        return np.clip(scores, 0.0, 1.0)
+
+    probs = preds
+    row_sums = probs.sum(axis=1)
+    if np.any(probs < 0.0) or np.any(probs > 1.0) or not np.allclose(row_sums, 1.0, atol=1e-3):
+        probs = _softmax(probs)
+
+    return np.clip(probs[:, _fake_class_index(probs.shape[1])], 0.0, 1.0)
+
+
+def analyze_video(video_path: str) -> Dict[str, Any]:
+    """Analyze sampled RGB frames and return video-level probabilities."""
+    model, model_input = _load_model()
+    frames, metadata = _extract_frames(video_path, _num_frames())
+    batch = _preprocess_frames(frames, model_input)
+
+    try:
+        with _predict_lock:
+            predictions = model.predict(batch, verbose=0)
+        frame_fake_probs = _frame_fake_probabilities(predictions, len(frames))
+    except Exception:
+        logger.exception("Video model prediction failed")
         raise
-    except Exception as exc:
-        logger.exception("[video_inference] Inference failed for %s", video_path)
-        raise RuntimeError(f"Video analysis failed: {exc}") from exc
+
+    fake_prob = float(np.mean(frame_fake_probs))
+    authentic_prob = 1.0 - fake_prob
+    is_fake = fake_prob >= _fake_threshold()
+    label = LABELS[1] if is_fake else LABELS[0]
+    confidence = fake_prob if is_fake else authentic_prob
+
+    explanation = (
+        f"The Keras video model analyzed {len(frames)} frames sampled across the "
+        f"video and averaged their predictions to a {fake_prob:.1%} deepfake "
+        f"probability. The sampled frame scores ranged from "
+        f"{float(np.min(frame_fake_probs)):.1%} to "
+        f"{float(np.max(frame_fake_probs)):.1%}."
+    )
+
+    return {
+        "media_type": "video",
+        "label": label,
+        "confidence": round(confidence * 100.0, 2),
+        "fake_probability": round(fake_prob * 100.0, 2),
+        "authentic_probability": round(authentic_prob * 100.0, 2),
+        "frames_analyzed": len(frames),
+        "video_metadata": metadata,
+        "explanation": explanation,
+    }

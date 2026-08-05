@@ -20,6 +20,7 @@ class AnalysisResponse(BaseModel):
     authentic_probability: Optional[float] = Field(default=None, ge=0, le=100)
     explanation: str
     frames_analyzed: Optional[int] = None
+    local_url: Optional[str] = None
     firebase_url: Optional[str] = None
     heatmap_url: Optional[str] = None
     xai_overlay_url: Optional[str] = None
@@ -37,3 +38,4 @@ class AnalysisResponse(BaseModel):
 class VideoAnalysisResponse(AnalysisResponse):
     media_type: Literal["video"]
     frames_analyzed: int = Field(..., ge=1)
+    video_metadata: Dict[str, Any]

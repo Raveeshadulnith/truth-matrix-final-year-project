@@ -8,6 +8,10 @@ from fastapi import UploadFile
 PathLike = Union[str, Path]
 
 
+class UploadTooLargeError(ValueError):
+    """Raised when a streamed upload exceeds its configured byte limit."""
+
+
 def get_file_extension(filename: str) -> str:
     """Return a lowercase file extension without the dot."""
     return Path(filename or "").suffix.lower().lstrip(".")
@@ -26,10 +30,16 @@ def generate_temp_filename(extension: str) -> str:
     return f"{uuid4().hex}.{clean_extension}"
 
 
-async def save_upload_file(upload_file: UploadFile, destination_path: PathLike) -> None:
+async def save_upload_file(
+    upload_file: UploadFile,
+    destination_path: PathLike,
+    *,
+    max_bytes: int | None = None,
+) -> int:
     """Save an uploaded file in chunks so large files do not fill memory."""
     destination = Path(destination_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    bytes_written = 0
 
     try:
         with destination.open("wb") as output_file:
@@ -37,7 +47,16 @@ async def save_upload_file(upload_file: UploadFile, destination_path: PathLike) 
                 chunk = await upload_file.read(1024 * 1024)
                 if not chunk:
                     break
+                bytes_written += len(chunk)
+                if max_bytes is not None and bytes_written > max_bytes:
+                    raise UploadTooLargeError(
+                        f"Upload exceeds the {max_bytes}-byte limit"
+                    )
                 output_file.write(chunk)
+        return bytes_written
+    except Exception:
+        remove_file_if_exists(destination)
+        raise
     finally:
         await upload_file.close()
 

@@ -22,6 +22,14 @@ export interface BackendUser {
   profile?: BackendProfile;
 }
 
+export interface VideoMetadata {
+  duration_seconds?: number | null;
+  fps?: number | null;
+  width?: number | null;
+  height?: number | null;
+  total_frames?: number | null;
+}
+
 export interface AuthResponse {
   access_token: string | null;
   refresh_token: string | null;
@@ -33,6 +41,7 @@ export interface BackendAnalysisRecord {
   user_id?: string;
   media_type: 'image' | 'video' | 'audio';
   original_filename?: string | null;
+  local_url?: string | null;
   firebase_url?: string | null;
   heatmap_url?: string | null;
   xai_overlay_url?: string | null;
@@ -61,6 +70,8 @@ export interface BackendAnalysisResponse {
   authentic_probability?: number | null;
   explanation?: string;
   frames_analyzed?: number | null;
+  video_metadata?: VideoMetadata | null;
+  local_url?: string | null;
   firebase_url?: string | null;
   heatmap_url?: string | null;
   xai_overlay_url?: string | null;

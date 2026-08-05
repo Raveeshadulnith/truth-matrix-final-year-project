@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   EyeIcon,
@@ -33,7 +33,7 @@ export function HeatmapViewer({
   const isImage = mediaType === 'image';
   const primaryXaiUrl = heatmapUrl || xaiOverlayUrl;
   const overlayUrl = xaiOverlayUrl || heatmapUrl;
-  const supportsHeatmap = mediaType !== 'audio' && Boolean(primaryXaiUrl);
+  const supportsHeatmap = isImage && Boolean(primaryXaiUrl);
   const availableViewModes = useMemo(() => {
     const originalMode = {
       id: 'original' as const,
@@ -42,7 +42,7 @@ export function HeatmapViewer({
     };
     const heatmapMode = {
       id: 'heatmap' as const,
-      label: mediaType === 'video' ? 'XAI Frames' : 'Heatmap',
+      label: 'Heatmap',
       icon: LayersIcon
     };
     const overlayMode = {
@@ -65,7 +65,7 @@ export function HeatmapViewer({
         ? [originalMode, heatmapMode, overlayMode, panelMode]
         : [originalMode, heatmapMode, overlayMode]
       : [originalMode, heatmapMode];
-  }, [isImage, mediaType, supportsHeatmap, xaiPanelUrl]);
+  }, [isImage, supportsHeatmap, xaiPanelUrl]);
   useEffect(() => {
     if (!availableViewModes.some((mode) => mode.id === viewMode)) {
       setViewMode('original');
@@ -304,7 +304,7 @@ export function HeatmapViewer({
                 opacity: 0
               }}
               animate={{
-                opacity: viewMode === 'heatmap' ? 1 : overlayOpacity / 100
+                opacity: overlayOpacity / 100
               }}
               transition={{
                 duration: 0.3
@@ -320,19 +320,13 @@ export function HeatmapViewer({
         </div>
       }
 
-      {mediaType === 'video' && supportsHeatmap &&
-      <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
-          The XAI Frames view shows Grad-CAM overlays for sampled video frames that contributed to the temporal model decision.
-        </div>
-      }
-
       {mediaType === 'image' && supportsHeatmap &&
       <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
           The Heatmap view shows the XAI regions returned by the backend. Overlay blends the heatmap with the original image.
         </div>
       }
 
-      {mediaType !== 'audio' && !supportsHeatmap &&
+      {mediaType === 'image' && !supportsHeatmap &&
       <div className="border-t border-gray-200 bg-amber-50/70 px-4 py-3 text-sm text-amber-800 dark:border-navy-700 dark:bg-amber-500/10 dark:text-amber-200">
           No XAI heatmap was returned for this analysis. Try reanalyzing after confirming XAI is enabled in the backend.
         </div>

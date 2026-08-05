@@ -2,7 +2,7 @@
 
 Truth Matrix is a FastAPI backend for the final year project **Deepfake Detection Web Application and Browser Extension with Explainable AI**.
 
-This backend can receive image, video, and audio uploads from a React frontend or browser extension, run temporary dummy inference, and return a clean JSON response. The real dataset and trained PyTorch model integration can be added later inside the `ml/` files.
+This backend receives image, video, and audio uploads from the React frontend and browser extension. Video detection uses the local Keras frame classifier at `ml/models/deepfake-detection-video-model1.h5`; audio inference is still a placeholder.
 
 ## Features
 
@@ -12,7 +12,7 @@ This backend can receive image, video, and audio uploads from a React frontend o
 - Temporary upload storage in `uploads/`
 - Automatic temporary file deletion after analysis
 - Static file serving from `results/`
-- Dummy prediction logic for early frontend integration
+- Keras video inference with bounded frame sampling and upload validation
 - Swagger API documentation
 
 ## Project Structure
@@ -82,23 +82,19 @@ http://127.0.0.1:8000/docs
 
 ## Environment Variables
 
-Create a `.env` file from `.env.example` if you want to customize CORS origins:
-
-```bash
-copy .env.example .env
-```
-
-Default local value:
+The video pipeline supports these optional settings:
 
 ```env
-CORS_ALLOWED_ORIGINS=*
+FRONTEND_URL=http://localhost:5173
+MAX_VIDEO_UPLOAD_BYTES=104857600
+VIDEO_NUM_FRAMES=16
+VIDEO_FRAME_SIZE=224
+VIDEO_FAKE_THRESHOLD=0.5
+VIDEO_SIGMOID_FAKE_VALUE=1
+VIDEO_KERAS_BACKEND=torch
 ```
 
-For stricter local frontend-only access, you can use:
-
-```env
-CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173
-```
+`VIDEO_SIGMOID_FAKE_VALUE=1` means the model's sigmoid output is interpreted as the deepfake probability. Keep this setting consistent with the model's training labels.
 
 ## Endpoints
 
@@ -157,11 +153,19 @@ Example response:
 ```json
 {
   "media_type": "video",
-  "label": "Suspected Deepfake",
-  "confidence": 88.4,
+  "label": "Authentic",
+  "confidence": 64.1,
+  "fake_probability": 35.9,
+  "authentic_probability": 64.1,
   "frames_analyzed": 16,
-  "explanation": "Temporary dummy result. Replace this with trained video model prediction later.",
-  "heatmap_url": null
+  "video_metadata": {
+    "duration_seconds": 248.3,
+    "fps": 30.0,
+    "width": 1280,
+    "height": 720,
+    "total_frames": 7449
+  },
+  "explanation": "The Keras video model analyzed 16 frames sampled across the video..."
 }
 ```
 
@@ -230,18 +234,4 @@ export function analyzeAudio(file) {
 }
 ```
 
-## Notes For Real Model Integration
-
-The current model logic is intentionally dummy logic so the frontend, browser extension, upload flow, and API contracts can be developed first.
-
-Later, replace these files with real trained PyTorch model inference:
-
-- `ml/image_inference.py`
-- `ml/video_inference.py`
-- `ml/audio_inference.py`
-
-A future real implementation can also write heatmap or explainability images into `results/` and return URLs such as:
-
-```text
-http://127.0.0.1:8000/results/example-heatmap.png
-```
+Video explainability and heatmap generation are intentionally deferred. The current video endpoint returns detection probabilities, sampled-frame count, and container metadata.

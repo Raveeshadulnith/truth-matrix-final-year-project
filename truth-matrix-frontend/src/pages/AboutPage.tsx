@@ -92,8 +92,8 @@ export function AboutPage() {
               journalism, personal security, and democratic processes.
             </p>
             <p>
-              We built TruthMatrix because we believe that everyoneâ€”from
-              newsrooms to everyday internet usersâ€”deserves the ability to
+              We built TruthMatrix because we believe that everyone, from
+              newsrooms to everyday internet users, deserves the ability to
               verify the media they consume. Our explainable AI approach ensures
               that our detection isn't a "black box," but a transparent tool
               that highlights specific manipulation artifacts.
