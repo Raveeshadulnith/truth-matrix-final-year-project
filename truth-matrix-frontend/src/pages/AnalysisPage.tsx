@@ -1,5 +1,6 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { VideoClipTimeline } from '../components/analysis/VideoClipTimeline';
 import { useAnalysisStore } from '../store/analysisStore';
 import { MAX_FILE_SIZE, ROUTES } from '../utils/constants';
 
@@ -13,8 +14,8 @@ const mediaOptions = [
   {
     value: 'video',
     label: 'Video',
-    accept: '.mp4,.mov,.avi,.mkv',
-    helperText: 'Upload MP4, MOV, AVI, or MKV videos.',
+    accept: '.mp4,.mov,.avi,.mkv,.webm',
+    helperText: 'Upload MP4, MOV, AVI, MKV, or WebM videos.',
   },
   {
     value: 'audio',
@@ -23,6 +24,8 @@ const mediaOptions = [
     helperText: 'Upload WAV, MP3, or M4A audio clips.',
   },
 ];
+
+const DEFAULT_VIDEO_SEGMENT_SECONDS = 10;
 
 function getSelectedOption(mediaType: string) {
   return mediaOptions.find((option) => option.value === mediaType) ?? mediaOptions[0];
@@ -38,7 +41,7 @@ function validateSelectedFile(file: File, mediaType: string): string | null {
   const extension = file.name.split('.').pop()?.toLowerCase();
   const allowedExtensions: Record<string, string[]> = {
     image: ['jpg', 'jpeg', 'png', 'webp'],
-    video: ['mp4', 'mov', 'avi', 'mkv'],
+    video: ['mp4', 'mov', 'avi', 'mkv', 'webm'],
     audio: ['wav', 'mp3', 'm4a'],
   };
   if (!extension || !allowedExtensions[mediaType]?.includes(extension)) {
@@ -56,22 +59,40 @@ const MODEL_NAMES: Record<string, string> = {
 export function AnalysisPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const { startUpload } = useAnalysisStore();
+  const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+  const { startUpload, analysisStatus, uploadProgress } = useAnalysisStore();
   const [mediaType, setMediaType] = useState('video');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState('');
+  const [videoDuration, setVideoDuration] = useState<number | null>(null);
+  const [segmentStart, setSegmentStart] = useState(0);
+  const [segmentEnd, setSegmentEnd] = useState(DEFAULT_VIDEO_SEGMENT_SECONDS);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<any>(null);
 
   const selectedOption = getSelectedOption(mediaType);
+  const segmentDuration = Math.max(0, segmentEnd - segmentStart);
   const heatmapSource = result?.xaiPanelUrl || result?.heatmapUrl;
 
   // result.result is 'fake' | 'real' | 'uncertain' (mapped in store)
   const isSuspectedDeepfake = result?.result === 'fake';
 
+  useEffect(() => {
+    return () => {
+      if (videoPreviewUrl) {
+        URL.revokeObjectURL(videoPreviewUrl);
+      }
+    };
+  }, [videoPreviewUrl]);
+
   function handleMediaTypeChange(event: React.ChangeEvent<HTMLSelectElement>) {
     setMediaType(event.target.value);
     setSelectedFile(null);
+    setVideoPreviewUrl('');
+    setVideoDuration(null);
+    setSegmentStart(0);
+    setSegmentEnd(DEFAULT_VIDEO_SEGMENT_SECONDS);
     setResult(null);
     setError('');
 
@@ -83,8 +104,46 @@ export function AnalysisPage() {
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] || null;
     setSelectedFile(file);
+    setVideoPreviewUrl(file && mediaType === 'video' ? URL.createObjectURL(file) : '');
+    setVideoDuration(null);
+    setSegmentStart(0);
+    setSegmentEnd(DEFAULT_VIDEO_SEGMENT_SECONDS);
     setResult(null);
     setError('');
+  }
+
+  function handleVideoMetadata(event: React.SyntheticEvent<HTMLVideoElement>) {
+    const duration = event.currentTarget.duration;
+    if (Number.isFinite(duration) && duration > 0) {
+      setVideoDuration(duration);
+      setSegmentStart(0);
+      setSegmentEnd(Math.min(DEFAULT_VIDEO_SEGMENT_SECONDS, duration));
+      event.currentTarget.currentTime = 0;
+    } else {
+      setError('Could not read the selected video duration.');
+    }
+  }
+
+  function handleSegmentChange(start: number, end: number, previewTime: number) {
+    setSegmentStart(start);
+    setSegmentEnd(end);
+    if (videoPreviewRef.current) {
+      videoPreviewRef.current.pause();
+      videoPreviewRef.current.currentTime = previewTime;
+    }
+  }
+
+  function handleVideoPlay(event: React.SyntheticEvent<HTMLVideoElement>) {
+    if (event.currentTarget.currentTime < segmentStart || event.currentTarget.currentTime >= segmentEnd) {
+      event.currentTarget.currentTime = segmentStart;
+    }
+  }
+
+  function handleVideoTimeUpdate(event: React.SyntheticEvent<HTMLVideoElement>) {
+    if (event.currentTarget.currentTime >= segmentEnd) {
+      event.currentTarget.pause();
+      event.currentTarget.currentTime = segmentStart;
+    }
   }
 
   async function handleAnalyze(event: React.FormEvent<HTMLFormElement>) {
@@ -103,11 +162,24 @@ export function AnalysisPage() {
       return;
     }
 
+    if (mediaType === 'video' && videoDuration === null) {
+      setError('Wait for the video preview to finish loading before analysis.');
+      return;
+    }
+
     setIsLoading(true);
 
     try {
-      await startUpload(selectedFile);
-      // Read the mapped Analysis object from the store after upload completes
+      await startUpload(
+        selectedFile,
+        mediaType === 'video'
+          ? {
+              startSeconds: segmentStart,
+              durationSeconds: segmentDuration,
+              sourceDurationSeconds: videoDuration ?? undefined,
+            }
+          : undefined
+      );
       const analysisResult = useAnalysisStore.getState().currentAnalysis;
       setResult(analysisResult);
       navigate(ROUTES.RESULTS);
@@ -212,10 +284,21 @@ export function AnalysisPage() {
 
             <button
               type="submit"
-              disabled={isLoading || !selectedFile}
+              disabled={
+                isLoading ||
+                !selectedFile ||
+                (mediaType === 'video' &&
+                  (videoDuration === null || segmentDuration <= 0))
+              }
               className="w-full rounded-2xl bg-gradient-to-r from-cyan-600 to-blue-700 px-6 py-3.5 text-base font-bold text-white shadow-lg shadow-cyan-600/25 transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-cyan-600/30 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0 dark:from-neon-cyan dark:to-neon-violet"
             >
-              {isLoading ? 'Analyzing...' : 'Analyze'}
+              {isLoading
+                ? analysisStatus === 'trimming'
+                  ? `Creating clip ${uploadProgress}%`
+                  : 'Analyzing...'
+                : mediaType === 'video'
+                  ? 'Analyze Selected Segment'
+                  : 'Analyze'}
             </button>
           </form>
 
@@ -233,7 +316,29 @@ export function AnalysisPage() {
               </span>
             </div>
 
-            {!result && !isLoading && (
+            {mediaType === 'video' && videoPreviewUrl && !result && !isLoading && (
+              <div className="space-y-5">
+                <video
+                  ref={videoPreviewRef}
+                  src={videoPreviewUrl}
+                  controls
+                  preload="metadata"
+                  onLoadedMetadata={handleVideoMetadata}
+                  onPlay={handleVideoPlay}
+                  onTimeUpdate={handleVideoTimeUpdate}
+                  className="aspect-video w-full bg-black object-contain"
+                />
+
+                <VideoClipTimeline
+                  duration={videoDuration}
+                  start={segmentStart}
+                  end={segmentEnd}
+                  onChange={handleSegmentChange}
+                />
+              </div>
+            )}
+
+            {!result && !isLoading && !(mediaType === 'video' && videoPreviewUrl) && (
               <div className="rounded-3xl border border-slate-200 bg-slate-50 p-6 text-slate-600 dark:border-navy-600 dark:bg-navy-900/70 dark:text-slate-300">
                 Your backend response will appear here after analysis. No dummy frontend
                 data is shown.
@@ -245,7 +350,9 @@ export function AnalysisPage() {
                 <div className="mb-4 h-2 overflow-hidden rounded-full bg-cyan-100 dark:bg-navy-900">
                   <div className="h-full w-2/3 animate-pulse rounded-full bg-cyan-600 dark:bg-neon-cyan" />
                 </div>
-                Analyzing with {MODEL_NAMES[mediaType]}...
+                {analysisStatus === 'trimming'
+                  ? `Creating the selected clip locally (${uploadProgress}%)...`
+                  : `Analyzing with ${MODEL_NAMES[mediaType]}...`}
               </div>
             )}
 
@@ -319,6 +426,13 @@ export function AnalysisPage() {
                         ? ` | ${result.videoMetadata.duration_seconds.toFixed(1)} seconds`
                         : ''}
                     </p>
+                    {result.videoMetadata.analyzed_segment?.selection_applied && (
+                      <p className="mt-2 text-sm font-semibold text-cyan-700 dark:text-neon-cyan">
+                        Analyzed {result.videoMetadata.analyzed_segment.start_seconds.toFixed(1)}s
+                        {' to '}
+                        {result.videoMetadata.analyzed_segment.end_seconds?.toFixed(1)}s
+                      </p>
+                    )}
                   </div>
                 )}
 

@@ -223,11 +223,37 @@ def _read_frame_at(cap, frame_index: int) -> Optional[np.ndarray]:
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
+def _read_frames_sequentially(
+    cap: cv2.VideoCapture,
+    frame_indices: np.ndarray,
+) -> List[np.ndarray]:
+    if frame_indices.size == 0:
+        return []
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_indices[0]))
+    frames: List[np.ndarray] = []
+    target_position = 0
+    current_frame = int(frame_indices[0])
+    final_frame = int(frame_indices[-1])
+
+    while current_frame <= final_frame and target_position < len(frame_indices):
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        target_frame = int(frame_indices[target_position])
+        if current_frame >= target_frame and frame.size:
+            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            target_position += 1
+        current_frame += 1
+
+    return frames
+
+
 def _positive_number(value: float) -> Optional[float]:
     return float(value) if np.isfinite(value) and value > 0 else None
 
 
-def _video_metadata(cap: cv2.VideoCapture) -> Dict[str, Union[int, float, None]]:
+def _video_metadata(cap: cv2.VideoCapture) -> Dict[str, Any]:
     fps = _positive_number(cap.get(cv2.CAP_PROP_FPS))
     frame_count_value = _positive_number(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width_value = _positive_number(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -243,14 +269,20 @@ def _video_metadata(cap: cv2.VideoCapture) -> Dict[str, Union[int, float, None]]
 
 
 def _stream_sample_frames(
-    cap: cv2.VideoCapture, n: int
+    cap: cv2.VideoCapture,
+    n: int,
+    *,
+    start_frame: int = 0,
+    end_frame: Optional[int] = None,
 ) -> Tuple[List[np.ndarray], int]:
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     samples: List[Tuple[int, np.ndarray]] = []
     seen = 0
     random = np.random.default_rng(0)
 
     while seen < _max_decode_frames():
+        if end_frame is not None and start_frame + seen >= end_frame:
+            break
         ok, frame = cap.read()
         if not ok or frame is None:
             break
@@ -271,8 +303,12 @@ def _stream_sample_frames(
 
 
 def _extract_frames(
-    video_path: str, n: int
-) -> Tuple[List[np.ndarray], Dict[str, Union[int, float, None]]]:
+    video_path: str,
+    n: int,
+    *,
+    segment_start_seconds: Optional[float] = None,
+    segment_duration_seconds: Optional[float] = None,
+) -> Tuple[List[np.ndarray], Dict[str, Any]]:
     path = Path(video_path)
     if not path.is_file() or path.stat().st_size == 0:
         raise VideoInputError("The uploaded video is empty or missing.")
@@ -285,25 +321,91 @@ def _extract_frames(
     try:
         metadata = _video_metadata(cap)
         total = metadata["total_frames"]
+        fps = metadata["fps"]
+        video_duration = metadata["duration_seconds"]
         frames: List[np.ndarray] = []
+        segment_selected = (
+            segment_start_seconds is not None and segment_duration_seconds is not None
+        )
 
-        if isinstance(total, int) and total > 0:
-            target_count = min(n, total)
-            indices = np.unique(
-                np.linspace(0, total - 1, target_count, dtype=int)
+        if segment_selected:
+            start_seconds = float(segment_start_seconds)
+            requested_end_seconds = start_seconds + float(segment_duration_seconds)
+            if isinstance(video_duration, float) and start_seconds >= video_duration:
+                raise VideoInputError(
+                    f"The selected segment starts after the video ends at {video_duration:.1f} seconds."
+                )
+            end_seconds = (
+                min(requested_end_seconds, video_duration)
+                if isinstance(video_duration, float)
+                else requested_end_seconds
             )
-            for index in indices:
-                frame = _read_frame_at(cap, int(index))
-                if frame is not None:
-                    frames.append(frame)
+        else:
+            start_seconds = 0.0
+            end_seconds = video_duration if isinstance(video_duration, float) else None
+
+        start_frame = 0
+        end_frame: Optional[int] = total if isinstance(total, int) else None
+        if segment_selected and isinstance(fps, float):
+            start_frame = max(0, int(np.floor(start_seconds * fps)))
+            end_frame = max(start_frame + 1, int(np.ceil(end_seconds * fps)))
+            if isinstance(total, int):
+                end_frame = min(end_frame, total)
+
+        metadata["analyzed_segment"] = {
+            "start_seconds": round(start_seconds, 3),
+            "end_seconds": round(end_seconds, 3) if end_seconds is not None else None,
+            "duration_seconds": (
+                round(end_seconds - start_seconds, 3)
+                if end_seconds is not None
+                else None
+            ),
+            "selection_applied": segment_selected,
+        }
+
+        if end_frame is not None and end_frame > start_frame:
+            available_frames = end_frame - start_frame
+            target_count = min(n, available_frames)
+            indices = np.unique(
+                np.linspace(start_frame, end_frame - 1, target_count, dtype=int)
+            )
+            if segment_selected:
+                frames = _read_frames_sequentially(cap, indices)
+            else:
+                for index in indices:
+                    frame = _read_frame_at(cap, int(index))
+                    if frame is not None:
+                        frames.append(frame)
             if len(frames) < target_count:
-                sequential_frames, _ = _stream_sample_frames(cap, n)
+                sequential_frames, _ = _stream_sample_frames(
+                    cap,
+                    n,
+                    start_frame=start_frame,
+                    end_frame=end_frame,
+                )
                 if sequential_frames:
                     frames = sequential_frames
 
+        if not frames and segment_selected and not isinstance(fps, float):
+            sample_times = np.linspace(
+                start_seconds,
+                max(start_seconds, end_seconds - 0.001),
+                n,
+            )
+            for sample_time in sample_times:
+                cap.set(cv2.CAP_PROP_POS_MSEC, float(sample_time) * 1000.0)
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size:
+                    frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
         if not frames:
-            frames, decoded_count = _stream_sample_frames(cap, n)
-            if metadata["total_frames"] is None and decoded_count:
+            frames, decoded_count = _stream_sample_frames(
+                cap,
+                n,
+                start_frame=start_frame,
+                end_frame=end_frame,
+            )
+            if metadata["total_frames"] is None and decoded_count and not segment_selected:
                 metadata["total_frames"] = decoded_count
                 fps = metadata["fps"]
                 if isinstance(fps, float):
@@ -375,10 +477,20 @@ def _frame_fake_probabilities(predictions: np.ndarray, frame_count: int) -> np.n
     return np.clip(probs[:, _fake_class_index(probs.shape[1])], 0.0, 1.0)
 
 
-def analyze_video(video_path: str) -> Dict[str, Any]:
+def analyze_video(
+    video_path: str,
+    *,
+    segment_start_seconds: Optional[float] = None,
+    segment_duration_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
     """Analyze sampled RGB frames and return video-level probabilities."""
     model, model_input = _load_model()
-    frames, metadata = _extract_frames(video_path, _num_frames())
+    frames, metadata = _extract_frames(
+        video_path,
+        _num_frames(),
+        segment_start_seconds=segment_start_seconds,
+        segment_duration_seconds=segment_duration_seconds,
+    )
     batch = _preprocess_frames(frames, model_input)
 
     try:
@@ -395,9 +507,15 @@ def analyze_video(video_path: str) -> Dict[str, Any]:
     label = LABELS[1] if is_fake else LABELS[0]
     confidence = fake_prob if is_fake else authentic_prob
 
+    segment = metadata["analyzed_segment"]
+    sampling_scope = (
+        f"between {segment['start_seconds']:.1f} and {segment['end_seconds']:.1f} seconds"
+        if segment["selection_applied"]
+        else "across the full video"
+    )
     explanation = (
-        f"The Keras video model analyzed {len(frames)} frames sampled across the "
-        f"video and averaged their predictions to a {fake_prob:.1%} deepfake "
+        f"The Keras video model analyzed {len(frames)} frames sampled {sampling_scope} "
+        f"and averaged their predictions to a {fake_prob:.1%} deepfake "
         f"probability. The sampled frame scores ranged from "
         f"{float(np.min(frame_fake_probs)):.1%} to "
         f"{float(np.max(frame_fake_probs)):.1%}."

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   XIcon,
@@ -13,25 +13,105 @@ import { Dropzone } from './Dropzone';
 import { Button } from '../common/Button';
 import { Input } from '../common/Input';
 import { Tabs } from '../common/Tabs';
+import { VideoClipTimeline } from '../analysis/VideoClipTimeline';
+import type { VideoSegmentSelection } from '../../api/deepfakeApi';
+
+const DEFAULT_VIDEO_SEGMENT_SECONDS = 10;
+
 interface UploadModalProps {
-  onFileSelect: (file: File) => void;
+  onFileSelect: (file: File, videoSegment?: VideoSegmentSelection) => void;
   onUrlSubmit: (url: string) => void;
 }
 export function UploadModal({ onFileSelect, onUrlSubmit }: UploadModalProps) {
   const { activeModal, closeModal } = useUIStore();
   const [urlInput, setUrlInput] = useState('');
-  const [activeTab, setActiveTab] = useState('upload');
+  const [pendingVideo, setPendingVideo] = useState<File | null>(null);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState('');
+  const [videoDuration, setVideoDuration] = useState<number | null>(null);
+  const [segmentStart, setSegmentStart] = useState(0);
+  const [segmentEnd, setSegmentEnd] = useState(DEFAULT_VIDEO_SEGMENT_SECONDS);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const isOpen = activeModal === 'upload-modal';
+  const segmentDuration = Math.max(0, segmentEnd - segmentStart);
+
+  useEffect(() => {
+    return () => {
+      if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl);
+    };
+  }, [videoPreviewUrl]);
+
+  const resetVideoSelection = () => {
+    setPendingVideo(null);
+    setVideoPreviewUrl('');
+    setVideoDuration(null);
+    setSegmentStart(0);
+    setSegmentEnd(DEFAULT_VIDEO_SEGMENT_SECONDS);
+  };
+
+  const handleClose = () => {
+    resetVideoSelection();
+    closeModal();
+  };
   const handleUrlSubmit = () => {
     if (urlInput.trim()) {
       onUrlSubmit(urlInput.trim());
       setUrlInput('');
-      closeModal();
+      handleClose();
     }
   };
   const handleFileSelect = (file: File) => {
+    if (file.type.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm)$/i.test(file.name)) {
+      setPendingVideo(file);
+      setVideoPreviewUrl(URL.createObjectURL(file));
+      setVideoDuration(null);
+      setSegmentStart(0);
+      setSegmentEnd(DEFAULT_VIDEO_SEGMENT_SECONDS);
+      return;
+    }
     onFileSelect(file);
-    closeModal();
+    handleClose();
+  };
+
+  const handleVideoMetadata = (event: React.SyntheticEvent<HTMLVideoElement>) => {
+    const duration = event.currentTarget.duration;
+    if (Number.isFinite(duration) && duration > 0) {
+      setVideoDuration(duration);
+      setSegmentStart(0);
+      setSegmentEnd(Math.min(DEFAULT_VIDEO_SEGMENT_SECONDS, duration));
+      event.currentTarget.currentTime = 0;
+    }
+  };
+
+  const handleSegmentChange = (start: number, end: number, previewTime: number) => {
+    setSegmentStart(start);
+    setSegmentEnd(end);
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = previewTime;
+    }
+  };
+
+  const handleVideoPlay = (event: React.SyntheticEvent<HTMLVideoElement>) => {
+    if (event.currentTarget.currentTime < segmentStart || event.currentTarget.currentTime >= segmentEnd) {
+      event.currentTarget.currentTime = segmentStart;
+    }
+  };
+
+  const handleVideoTimeUpdate = (event: React.SyntheticEvent<HTMLVideoElement>) => {
+    if (event.currentTarget.currentTime >= segmentEnd) {
+      event.currentTarget.pause();
+      event.currentTarget.currentTime = segmentStart;
+    }
+  };
+
+  const analyzeSelectedVideo = () => {
+    if (!pendingVideo || videoDuration === null) return;
+    onFileSelect(pendingVideo, {
+      startSeconds: segmentStart,
+      durationSeconds: segmentDuration,
+      sourceDurationSeconds: videoDuration,
+    });
+    handleClose();
   };
   const tabs = [
   {
@@ -40,7 +120,41 @@ export function UploadModal({ onFileSelect, onUrlSubmit }: UploadModalProps) {
     icon: <ImageIcon className="w-4 h-4" />,
     content:
     <div className="py-4">
-          <Dropzone onFileSelect={handleFileSelect} />
+          {pendingVideo ? (
+            <div className="space-y-4">
+              <video
+                ref={videoRef}
+                src={videoPreviewUrl}
+                controls
+                preload="metadata"
+                onLoadedMetadata={handleVideoMetadata}
+                onPlay={handleVideoPlay}
+                onTimeUpdate={handleVideoTimeUpdate}
+                className="aspect-video w-full bg-black object-contain"
+              />
+              <VideoClipTimeline
+                duration={videoDuration}
+                start={segmentStart}
+                end={segmentEnd}
+                onChange={handleSegmentChange}
+              />
+              <div className="flex gap-3">
+                <Button variant="secondary" className="flex-1" onClick={resetVideoSelection}>
+                  Choose Different
+                </Button>
+                <Button
+                  variant="primary"
+                  className="flex-1"
+                  onClick={analyzeSelectedVideo}
+                  disabled={videoDuration === null}
+                >
+                  Analyze Segment
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <Dropzone onFileSelect={handleFileSelect} />
+          )}
         </div>
 
   },
@@ -103,7 +217,7 @@ export function UploadModal({ onFileSelect, onUrlSubmit }: UploadModalProps) {
             opacity: 0
           }}
           className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-          onClick={closeModal} />
+          onClick={handleClose} />
 
 
           {/* Modal */}
@@ -123,7 +237,7 @@ export function UploadModal({ onFileSelect, onUrlSubmit }: UploadModalProps) {
             scale: 0.95,
             y: 20
           }}
-          className="relative w-full max-w-2xl bg-white dark:bg-navy-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-navy-600 overflow-hidden">
+          className="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-navy-600 dark:bg-navy-800">
 
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-navy-700">
@@ -131,7 +245,7 @@ export function UploadModal({ onFileSelect, onUrlSubmit }: UploadModalProps) {
                 Upload Media for Analysis
               </h2>
               <button
-              onClick={closeModal}
+              onClick={handleClose}
               className="p-2 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-navy-700 transition-colors">
 
                 <XIcon className="w-5 h-5" />
@@ -143,8 +257,7 @@ export function UploadModal({ onFileSelect, onUrlSubmit }: UploadModalProps) {
               <Tabs
               tabs={tabs}
               defaultTab="upload"
-              variant="pills"
-              onChange={setActiveTab} />
+              variant="pills" />
 
             </div>
 
@@ -157,7 +270,7 @@ export function UploadModal({ onFileSelect, onUrlSubmit }: UploadModalProps) {
                 </span>
                 <span className="flex items-center gap-1.5">
                   <VideoIcon className="w-4 h-4" />
-                  MP4, MOV, AVI, MKV
+                  MP4, MOV, AVI, MKV, WebM
                 </span>
                 <span className="flex items-center gap-1.5">
                   <MusicIcon className="w-4 h-4" />

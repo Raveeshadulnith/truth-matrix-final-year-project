@@ -76,6 +76,7 @@ export function ResultCard({
     Icon: ImageIcon,
   };
   const ModelIcon = modelInfo.Icon;
+  const analyzedSegment = analysis.videoMetadata?.analyzed_segment;
   const xaiTarget = analysis.xaiTargetClass
     ? ` (${analysis.xaiTargetClass.replace(/_/g, ' ')})`
     : '';
@@ -187,6 +188,15 @@ export function ResultCard({
                   {analysis.framesAnalyzed} frames analysed
                 </Badge>
               )}
+
+              {analysis.fileType === 'video' &&
+                analyzedSegment?.selection_applied &&
+                analyzedSegment.end_seconds != null && (
+                  <Badge variant="info" size="sm">
+                    {analyzedSegment.start_seconds.toFixed(1)}s -{' '}
+                    {analyzedSegment.end_seconds.toFixed(1)}s segment
+                  </Badge>
+                )}
 
               {analysis.fileType !== 'video' && (
                 <Badge variant={analysis.heatmapUrl ? 'default' : 'warning'} size="sm">

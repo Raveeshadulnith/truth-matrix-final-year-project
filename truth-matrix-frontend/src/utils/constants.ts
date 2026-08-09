@@ -10,7 +10,9 @@ export const SUPPORTED_IMAGE_TYPES = [
 
 export const SUPPORTED_VIDEO_TYPES = [
 'video/mp4',
+'video/webm',
 'video/quicktime',
+'video/avi',
 'video/x-msvideo',
 'video/x-matroska'];
 

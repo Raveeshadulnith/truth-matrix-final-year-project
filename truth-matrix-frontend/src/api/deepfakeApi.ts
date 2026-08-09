@@ -28,6 +28,18 @@ export interface VideoMetadata {
   width?: number | null;
   height?: number | null;
   total_frames?: number | null;
+  analyzed_segment?: {
+    start_seconds: number;
+    end_seconds?: number | null;
+    duration_seconds?: number | null;
+    selection_applied: boolean;
+  };
+}
+
+export interface VideoSegmentSelection {
+  startSeconds: number;
+  durationSeconds: number;
+  sourceDurationSeconds?: number;
 }
 
 export interface AuthResponse {
@@ -256,7 +268,8 @@ export function updateCurrentProfile(
 async function uploadForAnalysis(
   endpoint: string,
   file: File,
-  accessToken: string
+  accessToken: string,
+  fields?: Record<string, string>
 ) {
   if (!file) {
     throw new Error('Please select a file before analyzing.');
@@ -264,6 +277,7 @@ async function uploadForAnalysis(
 
   const formData = new FormData();
   formData.append('file', file);
+  Object.entries(fields || {}).forEach(([key, value]) => formData.append(key, value));
 
   return apiRequest<BackendAnalysisResponse>(
     endpoint,
@@ -280,7 +294,10 @@ export function analyzeImage(file: File, accessToken: string) {
   return uploadForAnalysis('/api/analyze/image', file, accessToken);
 }
 
-export function analyzeVideo(file: File, accessToken: string) {
+export function analyzeVideo(
+  file: File,
+  accessToken: string
+) {
   return uploadForAnalysis('/api/analyze/video', file, accessToken);
 }
 

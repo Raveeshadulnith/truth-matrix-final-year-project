@@ -13,6 +13,7 @@ import { UploadModal } from './components/upload/UploadModal';
 import { useAuthStore } from './store/authStore';
 import { useUIStore } from './store/uiStore';
 import { useAnalysisStore } from './store/analysisStore';
+import type { VideoSegmentSelection } from './api/deepfakeApi';
 import { ROUTES } from './utils/constants';
 import { LandingPage } from './pages/LandingPage';
 import { LoginPage } from './pages/LoginPage';
@@ -77,12 +78,21 @@ function AppShell() {
     }
   }, [accessToken, fetchHistory, isAuthenticated]);
 
-  const handleFileSelect = async (file: File) => {
+  const handleFileSelect = async (
+    file: File,
+    videoSegment?: VideoSegmentSelection
+  ) => {
+    const toastId = toast.loading(
+      videoSegment ? 'Creating the selected clip locally...' : 'Uploading media...'
+    );
     try {
-      await startUpload(file);
+      await startUpload(file, videoSegment);
+      toast.success('Analysis complete.', { id: toastId });
       navigate(ROUTES.RESULTS);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Analysis failed.');
+      toast.error(error instanceof Error ? error.message : 'Analysis failed.', {
+        id: toastId,
+      });
     }
   };
 

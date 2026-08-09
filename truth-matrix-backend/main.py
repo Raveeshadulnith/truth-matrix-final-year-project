@@ -1,4 +1,5 @@
 import logging
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 import requests
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -61,20 +62,22 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
-VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv"}
+VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm"}
 AUDIO_EXTENSIONS = {"wav", "mp3", "m4a"}
 MAX_REMOTE_IMAGE_BYTES = int(os.getenv("MAX_REMOTE_IMAGE_BYTES", str(15 * 1024 * 1024)))
 MAX_VIDEO_UPLOAD_BYTES = int(
     os.getenv("MAX_VIDEO_UPLOAD_BYTES", str(100 * 1024 * 1024))
 )
+MAX_VIDEO_SEGMENT_SECONDS = float(os.getenv("MAX_VIDEO_SEGMENT_SECONDS", "30"))
 VIDEO_CONTENT_TYPES = {
     "video/mp4",
+    "video/webm",
+    "video/x-matroska",
     "video/quicktime",
     "video/avi",
     "video/msvideo",
     "video/x-ms-video",
     "video/x-msvideo",
-    "video/x-matroska",
     "application/octet-stream",
 }
 
@@ -453,13 +456,44 @@ async def analyze_public_image_endpoint(file: UploadFile = File(...)) -> Dict[st
 @app.post("/api/analyze/video", response_model=VideoAnalysisResponse)
 async def analyze_video_endpoint(
     file: UploadFile = File(...),
+    segment_start_seconds: Optional[float] = Form(default=None),
+    segment_duration_seconds: Optional[float] = Form(default=None),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
+    if (segment_start_seconds is None) != (segment_duration_seconds is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Video segment start and duration must be provided together.",
+        )
+
+    if segment_start_seconds is not None and segment_duration_seconds is not None:
+        if not math.isfinite(segment_start_seconds) or segment_start_seconds < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Video segment start must be a non-negative number.",
+            )
+        if (
+            not math.isfinite(segment_duration_seconds)
+            or segment_duration_seconds <= 0
+            or segment_duration_seconds > MAX_VIDEO_SEGMENT_SECONDS
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Video segment duration must be between 0 and {MAX_VIDEO_SEGMENT_SECONDS:g} seconds.",
+            )
+
+    def analyze_selected_segment(video_path: str) -> Dict[str, Any]:
+        return analyze_video(
+            video_path,
+            segment_start_seconds=segment_start_seconds,
+            segment_duration_seconds=segment_duration_seconds,
+        )
+
     return await _analyze_upload(
         file=file,
         media_type="video",
         allowed_extensions=VIDEO_EXTENSIONS,
-        analyzer=analyze_video,
+        analyzer=analyze_selected_segment,
         current_user=current_user,
         max_upload_bytes=MAX_VIDEO_UPLOAD_BYTES,
         allowed_content_types=VIDEO_CONTENT_TYPES,
