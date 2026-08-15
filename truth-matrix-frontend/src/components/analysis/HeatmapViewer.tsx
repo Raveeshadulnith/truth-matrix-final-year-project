@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import {
   EyeIcon,
   EyeOffIcon,
@@ -30,10 +30,11 @@ export function HeatmapViewer({
   );
   const [overlayOpacity, setOverlayOpacity] = useState(50);
   const [zoom, setZoom] = useState(100);
+  const reduceMotion = useReducedMotion();
   const isImage = mediaType === 'image';
   const primaryXaiUrl = heatmapUrl || xaiOverlayUrl;
   const overlayUrl = xaiOverlayUrl || heatmapUrl;
-  const supportsHeatmap = isImage && Boolean(primaryXaiUrl);
+  const supportsHeatmap = isImage && Boolean(primaryXaiUrl || xaiPanelUrl);
   const availableViewModes = useMemo(() => {
     const originalMode = {
       id: 'original' as const,
@@ -52,7 +53,7 @@ export function HeatmapViewer({
     };
     const panelMode = {
       id: 'panel' as const,
-      label: 'XAI Panel',
+      label: 'Panel',
       icon: LayersIcon
     };
 
@@ -60,12 +61,17 @@ export function HeatmapViewer({
       return [originalMode];
     }
 
-    return isImage
-      ? xaiPanelUrl
-        ? [originalMode, heatmapMode, overlayMode, panelMode]
-        : [originalMode, heatmapMode, overlayMode]
-      : [originalMode, heatmapMode];
-  }, [isImage, supportsHeatmap, xaiPanelUrl]);
+    const modes: Array<
+      | typeof originalMode
+      | typeof overlayMode
+      | typeof heatmapMode
+      | typeof panelMode
+    > = [originalMode];
+    if (isImage && overlayUrl) modes.push(overlayMode);
+    if (primaryXaiUrl) modes.push(heatmapMode);
+    if (isImage && xaiPanelUrl) modes.push(panelMode);
+    return modes;
+  }, [isImage, overlayUrl, primaryXaiUrl, supportsHeatmap, xaiPanelUrl]);
   useEffect(() => {
     if (!availableViewModes.some((mode) => mode.id === viewMode)) {
       setViewMode('original');
@@ -90,14 +96,12 @@ export function HeatmapViewer({
           controls
           playsInline
           className={sharedMediaClassName}
-          initial={{
-            opacity: 0
-          }}
+          initial={reduceMotion ? false : { opacity: 0 }}
           animate={{
             opacity: 1
           }}
           transition={{
-            duration: 0.3
+            duration: reduceMotion ? 0 : 0.3
           }} />
 
       );
@@ -107,14 +111,12 @@ export function HeatmapViewer({
       return (
         <motion.div
           className="flex w-full max-w-xl flex-col items-center gap-4 rounded-2xl border border-gray-200 bg-white/90 px-6 py-8 shadow-lg dark:border-navy-700 dark:bg-navy-800"
-          initial={{
-            opacity: 0
-          }}
+          initial={reduceMotion ? false : { opacity: 0 }}
           animate={{
             opacity: 1
           }}
           transition={{
-            duration: 0.3
+            duration: reduceMotion ? 0 : 0.3
           }}>
 
           <div className="text-center">
@@ -139,14 +141,12 @@ export function HeatmapViewer({
         src={originalUrl}
         alt={filename}
         className={sharedMediaClassName}
-        initial={{
-          opacity: 0
-        }}
+        initial={reduceMotion ? false : { opacity: 0 }}
         animate={{
           opacity: viewMode === 'heatmap' ? 0 : 1
         }}
         transition={{
-          duration: 0.3
+          duration: reduceMotion ? 0 : 0.3
         }} />
 
     );
@@ -161,14 +161,12 @@ export function HeatmapViewer({
         src={sourceUrl}
         alt={`${filename} XAI visualization`}
         className={sharedMediaClassName}
-        initial={{
-          opacity: 0
-        }}
+        initial={reduceMotion ? false : { opacity: 0 }}
         animate={{
           opacity: 1
         }}
         transition={{
-          duration: 0.3
+          duration: reduceMotion ? 0 : 0.3
         }} />
 
     );
@@ -202,10 +200,14 @@ export function HeatmapViewer({
       {/* Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-4 p-4 border-b border-gray-200 dark:border-navy-700 bg-gray-50 dark:bg-navy-900/50">
         {/* View Mode Toggle */}
-        <div className="flex items-center gap-1 p-1 bg-gray-100 dark:bg-navy-800 rounded-xl">
+        <div className="flex items-center gap-1 p-1 bg-gray-100 dark:bg-navy-800 rounded-xl" role="tablist" aria-label="XAI view">
           {availableViewModes.map((mode) =>
           <button
             key={mode.id}
+            type="button"
+            role="tab"
+            aria-selected={viewMode === mode.id}
+            aria-controls="xai-view-panel"
             onClick={() => setViewMode(mode.id)}
             className={`
                 flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all
@@ -275,9 +277,11 @@ export function HeatmapViewer({
 
       {/* Image Viewer */}
       <div
+        id="xai-view-panel"
+        role="tabpanel"
         className="relative overflow-auto bg-gray-100 dark:bg-navy-900"
         style={{
-          height: mediaType === 'image' ? 'min(70vh, 620px)' : '400px',
+          height: mediaType === 'image' ? 'min(58vh, 480px)' : '360px',
           minHeight: mediaType === 'image' ? '420px' : undefined
         }}>
 
@@ -300,14 +304,12 @@ export function HeatmapViewer({
               src={heatmapUrl}
               alt={`${filename} heatmap`}
               className="absolute inset-0 h-full w-full rounded-lg object-contain mix-blend-multiply"
-              initial={{
-                opacity: 0
-              }}
+              initial={reduceMotion ? false : { opacity: 0 }}
               animate={{
                 opacity: overlayOpacity / 100
               }}
               transition={{
-                duration: 0.3
+                duration: reduceMotion ? 0 : 0.3
               }} />
             }
           </div>
@@ -316,19 +318,19 @@ export function HeatmapViewer({
 
       {mediaType === 'audio' &&
       <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
-          Audio XAI is not available yet because the trained audio model is still in progress.
+          This audio classifier returns a file-level verdict and class probabilities, without a visual explanation or temporal localization.
         </div>
       }
 
       {mediaType === 'image' && supportsHeatmap &&
       <div className="border-t border-gray-200 bg-blue-50/70 px-4 py-3 text-sm text-blue-800 dark:border-navy-700 dark:bg-blue-500/10 dark:text-blue-200">
-          The Heatmap view shows the XAI regions returned by the backend. Overlay blends the heatmap with the original image.
+          These visual explanation views show only assets returned by the backend. An overlay blends a returned heatmap with the original image when both are available.
         </div>
       }
 
       {mediaType === 'image' && !supportsHeatmap &&
       <div className="border-t border-gray-200 bg-amber-50/70 px-4 py-3 text-sm text-amber-800 dark:border-navy-700 dark:bg-amber-500/10 dark:text-amber-200">
-          No XAI heatmap was returned for this analysis. Try reanalyzing after confirming XAI is enabled in the backend.
+          No visual explanation asset was returned for this model result.
         </div>
       }
 
@@ -339,25 +341,25 @@ export function HeatmapViewer({
             <div className="flex items-center gap-2">
               <div className="w-4 h-4 rounded bg-gradient-to-r from-red-500 to-red-600" />
               <span className="text-sm text-gray-600 dark:text-gray-400">
-                High manipulation
+                Highest model attention
               </span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-4 h-4 rounded bg-gradient-to-r from-orange-400 to-orange-500" />
               <span className="text-sm text-gray-600 dark:text-gray-400">
-                Medium
+                Medium attention
               </span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-4 h-4 rounded bg-gradient-to-r from-yellow-400 to-yellow-500" />
               <span className="text-sm text-gray-600 dark:text-gray-400">
-                Low
+                Lower attention
               </span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-4 h-4 rounded bg-gradient-to-r from-blue-400 to-blue-500" />
               <span className="text-sm text-gray-600 dark:text-gray-400">
-                Authentic
+                Lowest attention
               </span>
             </div>
           </div>

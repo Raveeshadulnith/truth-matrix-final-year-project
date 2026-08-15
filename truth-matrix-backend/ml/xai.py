@@ -1,7 +1,7 @@
 """
 Grad-CAM (Gradient-weighted Class Activation Mapping) for the image model.
 
-The EfficientNet-B4 (timm) SiLU activation outputs
+The legacy EfficientNet-B4 SiLU activation outputs
 (B, 1792, 7, 7) spatial feature maps *before* global average pooling.
 A torchvision fallback hooks the last block in backbone.features instead.
 
@@ -114,7 +114,7 @@ def _target_layer(model):
     """
     Return the last spatial activation layer of the EfficientNet-B4 backbone.
 
-    timm path  : model.backbone.act2
+    EfficientNet path: model.backbone.act2
                  → output (B, 1792, 7, 7) for 224×224 input
     tv fallback: last block in model.backbone[0]
                  (features[-1] of torchvision EfficientNet-B4)

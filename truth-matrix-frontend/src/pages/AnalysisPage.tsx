@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { VideoClipTimeline } from '../components/analysis/VideoClipTimeline';
-import { useAnalysisStore } from '../store/analysisStore';
+import { useAnalysisStore, type Analysis } from '../store/analysisStore';
 import { MAX_FILE_SIZE, ROUTES } from '../utils/constants';
 
 const mediaOptions = [
@@ -53,7 +53,7 @@ function validateSelectedFile(file: File, mediaType: string): string | null {
 const MODEL_NAMES: Record<string, string> = {
   image: 'EfficientNet-B4',
   video: 'Keras .h5 Frame CNN',
-  audio: 'Audio Deepfake Model',
+  audio: 'Local Wav2Vec2 audio classifier',
 };
 
 export function AnalysisPage() {
@@ -61,7 +61,7 @@ export function AnalysisPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
   const { startUpload, analysisStatus, uploadProgress } = useAnalysisStore();
-  const [mediaType, setMediaType] = useState('video');
+  const [mediaType, setMediaType] = useState<Analysis['fileType']>('video');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState('');
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
@@ -69,11 +69,14 @@ export function AnalysisPage() {
   const [segmentEnd, setSegmentEnd] = useState(DEFAULT_VIDEO_SEGMENT_SECONDS);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<Analysis | null>(null);
 
   const selectedOption = getSelectedOption(mediaType);
   const segmentDuration = Math.max(0, segmentEnd - segmentStart);
-  const heatmapSource = result?.xaiPanelUrl || result?.heatmapUrl;
+  const heatmapSource =
+    result?.fileType === 'image'
+      ? result.xaiPanelUrl ?? result.heatmapUrl
+      : undefined;
 
   // result.result is 'fake' | 'real' | 'uncertain' (mapped in store)
   const isSuspectedDeepfake = result?.result === 'fake';
@@ -87,7 +90,7 @@ export function AnalysisPage() {
   }, [videoPreviewUrl]);
 
   function handleMediaTypeChange(event: React.ChangeEvent<HTMLSelectElement>) {
-    setMediaType(event.target.value);
+    setMediaType(event.target.value as Analysis['fileType']);
     setSelectedFile(null);
     setVideoPreviewUrl('');
     setVideoDuration(null);
@@ -374,6 +377,21 @@ export function AnalysisPage() {
                   </p>
                 </div>
 
+                {result.fileType === 'audio' && result.mediaUrl && (
+                  <div className="rounded-2xl bg-slate-50 p-4 dark:bg-navy-900/80">
+                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                      Audio preview
+                    </p>
+                    <audio
+                      controls
+                      preload="metadata"
+                      src={result.mediaUrl}
+                      className="w-full"
+                      aria-label={`Audio preview for ${result.filename}`}
+                    />
+                  </div>
+                )}
+
                 {/* Stats grid */}
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="rounded-2xl bg-slate-50 p-4 dark:bg-navy-900/80">
@@ -391,6 +409,18 @@ export function AnalysisPage() {
                       {Number(result.confidence).toFixed(2)}%
                     </p>
                   </div>
+                  <div className="rounded-2xl bg-slate-50 p-4 dark:bg-navy-900/80">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                      Fake class probability
+                    </p>
+                    <p className="mt-2 text-lg font-bold">{result.fakeProb.toFixed(2)}%</p>
+                  </div>
+                  <div className="rounded-2xl bg-slate-50 p-4 dark:bg-navy-900/80">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                      Authentic class probability
+                    </p>
+                    <p className="mt-2 text-lg font-bold">{result.realProb.toFixed(2)}%</p>
+                  </div>
                 </div>
 
                 {/* Model used */}
@@ -399,9 +429,16 @@ export function AnalysisPage() {
                     Model used
                   </p>
                   <p className="mt-2 font-semibold text-cyan-700 dark:text-neon-cyan">
-                    {MODEL_NAMES[result.fileType] ?? result.fileType}
+                    {result.modelVersion ?? MODEL_NAMES[result.fileType] ?? result.fileType}
                   </p>
                 </div>
+
+                {result.fileType === 'audio' && (
+                  <p className="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
+                    This classifier returns a file-level audio result. No visual explanation,
+                    waveform highlight, or temporal localization is provided.
+                  </p>
+                )}
 
                 {/* Frames analysed (video only) */}
                 {result.fileType === 'video' && result.framesAnalyzed != null && (

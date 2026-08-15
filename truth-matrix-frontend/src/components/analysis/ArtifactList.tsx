@@ -1,5 +1,4 @@
 import React from 'react';
-import { motion } from 'framer-motion';
 import {
   AlertTriangleIcon,
   SunIcon,
@@ -21,6 +20,9 @@ const artifactIcons: Record<string, React.ElementType> = {
   audio_visual_mismatch: VolumeXIcon,
   gan_artifact: SparklesIcon,
   visual_manipulation_signal: AlertTriangleIcon,
+  ai_generated_classification: AlertTriangleIcon,
+  audio_fake_classification: VolumeXIcon,
+  model_visual_explanation: LayersIcon,
   frame_manipulation_signal: AlertTriangleIcon,
   gradcam_heatmap: LayersIcon,
   gradcam_frame_heatmap: LayersIcon,
@@ -32,11 +34,11 @@ export function ArtifactList({ artifacts }: ArtifactListProps) {
   if (artifacts.length === 0) {
     return (
       <div className="text-center py-8">
-        <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center mb-4">
-          <SparklesIcon className="w-8 h-8 text-emerald-500" />
+        <div className="w-16 h-16 mx-auto rounded-2xl bg-gray-100 dark:bg-navy-700 flex items-center justify-center mb-4">
+          <SparklesIcon className="w-8 h-8 text-gray-500 dark:text-gray-300" />
         </div>
         <p className="text-gray-600 dark:text-gray-400">
-          No XAI findings returned for this analysis
+          No model explanation findings were returned for this analysis
         </p>
       </div>);
 
@@ -44,10 +46,10 @@ export function ArtifactList({ artifacts }: ArtifactListProps) {
   return (
     <div className="space-y-3">
       <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
-        XAI Findings ({artifacts.length})
+        Model findings ({artifacts.length})
       </h3>
 
-      {artifacts.map((artifact, index) => {
+      {artifacts.map((artifact) => {
         const Icon = artifactIcons[artifact.type] || artifactIcons.default;
         const isHeatmap = artifact.type.includes('gradcam');
         const isUncertain = artifact.type.includes('uncertain');
@@ -67,19 +69,8 @@ export function ArtifactList({ artifacts }: ArtifactListProps) {
             ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400'
             : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-400';
         return (
-          <motion.div
+          <div
             key={artifact.id}
-            initial={{
-              opacity: 0,
-              x: -20
-            }}
-            animate={{
-              opacity: 1,
-              x: 0
-            }}
-            transition={{
-              delay: index * 0.1
-            }}
             className={`flex items-start gap-4 p-4 rounded-xl border ${toneClass}`}>
 
             <div className={`flex-shrink-0 p-2 rounded-lg ${iconClass}`}>
@@ -105,7 +96,7 @@ export function ArtifactList({ artifacts }: ArtifactListProps) {
                 </span>
               </p>
             </div>
-          </motion.div>);
+          </div>);
 
       })}
     </div>);

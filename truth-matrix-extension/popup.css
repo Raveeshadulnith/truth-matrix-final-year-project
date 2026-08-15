@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-
 /* ── Design tokens ─────────────────────────────────── */
 :root {
   --bg:        #0a0812;
@@ -37,7 +35,9 @@ body {
   font-size: 13px;
   color: var(--text);
   background: var(--bg);
-  overflow: hidden;
+  max-height: 600px;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 button, input, select { font: inherit; }
@@ -653,8 +653,157 @@ button, input, select { font: inherit; }
   transform: translateY(-1px);
 }
 
+.model-result-summary {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(167, 139, 250, 0.055);
+}
+
+.model-result-head,
+.model-result-meta {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 6px 10px;
+}
+
+.model-result-head .section-tag,
+.model-result-meta span {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.model-result-head strong,
+.model-result-meta strong {
+  color: var(--text-2);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.model-probabilities {
+  margin-bottom: 0;
+}
+
+.model-legacy-note,
+.model-meaning-note {
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.model-result-summary .explain-box {
+  margin-bottom: 0;
+}
+
+.forensic-summary {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(56, 189, 248, 0.045);
+}
+
+.forensic-head,
+.forensic-row,
+.forensic-hash {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.forensic-head .section-tag,
+.forensic-row > span,
+.forensic-hash > span,
+.forensic-grid span {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.forensic-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.forensic-grid > div {
+  min-width: 0;
+  padding: 8px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.forensic-grid strong,
+.forensic-row strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-2);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.forensic-state {
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.forensic-state.positive { color: var(--green); }
+.forensic-state.caution { color: var(--amber); }
+.forensic-state.negative { color: var(--red); }
+.forensic-state.neutral { color: var(--cyan); }
+
+.forensic-fingerprint,
+.forensic-hash code {
+  display: block;
+  min-width: 0;
+  color: var(--text-2);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.forensic-hash {
+  flex-wrap: wrap;
+}
+
+.forensic-hash code {
+  flex: 1 1 100%;
+}
+
+.forensic-hash .copy-hash {
+  padding: 6px 9px;
+}
+
+.forensic-note {
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
 /* ── Error state ────────────────────────────────────── */
 .error-panel { padding: 20px 16px; display: flex; flex-direction: column; gap: 12px; }
+
+.error-image-wrap {
+  margin-bottom: 12px;
+  border-radius: 14px;
+}
 
 .error-icon {
   width: 48px; height: 48px;
@@ -800,4 +949,28 @@ button, input, select { font: inherit; }
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+.forensic-origin {
+  display: grid;
+  gap: 5px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 10px;
+  background: rgba(124, 58, 237, 0.1);
+}
+
+.forensic-origin strong,
+.forensic-origin small {
+  overflow-wrap: anywhere;
+}
+
+.forensic-origin--caution {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.forensic-origin--negative {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.1);
 }

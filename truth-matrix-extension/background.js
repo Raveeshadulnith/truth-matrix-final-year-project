@@ -1,10 +1,17 @@
-﻿const API_BASE_URL = 'http://127.0.0.1:8000';
+importScripts('extension-shared.js');
+
+const {
+  API_BASE_URL,
+  normalizeBackendAnalysisResponse,
+  normalizeAnalysisState,
+  normalizeHistory,
+} = globalThis.TruthMatrixExtension;
+
 const IMAGE_URL_ENDPOINT = `${API_BASE_URL}/api/analyze/image-url`;
 const IMAGE_PUBLIC_ENDPOINT = `${API_BASE_URL}/api/analyze/image-public`;
 const CONTEXT_MENU_ID = 'truth-matrix-verify-image';
 const STORAGE_KEY = 'truthMatrixAnalysisState';
 const HISTORY_KEY = 'truthMatrixAnalysisHistory';
-const MAX_HISTORY_ITEMS = 5;
 
 function createContextMenu() {
   chrome.contextMenus.removeAll(() => {
@@ -16,22 +23,41 @@ function createContextMenu() {
   });
 }
 
-chrome.runtime.onInstalled.addListener(createContextMenu);
-chrome.runtime.onStartup.addListener(createContextMenu);
+async function migrateStoredState() {
+  const stored = await chrome.storage.local.get([STORAGE_KEY, HISTORY_KEY]);
+  const updates = {};
+  const state = normalizeAnalysisState(stored[STORAGE_KEY]);
+  const history = normalizeHistory(stored[HISTORY_KEY]);
+
+  if (state) updates[STORAGE_KEY] = state;
+  if (Array.isArray(stored[HISTORY_KEY])) updates[HISTORY_KEY] = history;
+  if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  createContextMenu();
+  void migrateStoredState();
+});
+chrome.runtime.onStartup.addListener(() => {
+  createContextMenu();
+  void migrateStoredState();
+});
 
 async function saveAnalysisState(state) {
+  const normalized = normalizeAnalysisState({
+    updatedAt: new Date().toISOString(),
+    ...state,
+  });
+  if (!normalized) return;
   await chrome.storage.local.set({
-    [STORAGE_KEY]: {
-      updatedAt: new Date().toISOString(),
-      ...state,
-    },
+    [STORAGE_KEY]: normalized,
   });
 }
 
 async function addHistoryItem(item) {
   const stored = await chrome.storage.local.get(HISTORY_KEY);
-  const history = Array.isArray(stored[HISTORY_KEY]) ? stored[HISTORY_KEY] : [];
-  const nextHistory = [item, ...history].slice(0, MAX_HISTORY_ITEMS);
+  const history = normalizeHistory(stored[HISTORY_KEY]);
+  const nextHistory = normalizeHistory([item, ...history]);
   await chrome.storage.local.set({ [HISTORY_KEY]: nextHistory });
 }
 
@@ -186,11 +212,15 @@ async function analyzeImageUrl(imageUrl) {
       });
     }
 
+    const normalizedResult = normalizeBackendAnalysisResponse(data);
+    if (!normalizedResult) {
+      throw new Error('Truth Matrix returned an invalid analysis result.');
+    }
     const completedAt = new Date().toISOString();
     const successState = {
       status: 'success',
       imageUrl,
-      result: data,
+      result: normalizedResult,
       error: null,
       startedAt,
       completedAt,
@@ -201,11 +231,13 @@ async function analyzeImageUrl(imageUrl) {
 
     showNotification(
       'Truth Matrix analysis complete',
-      `${data.label} - ${Number(data.confidence).toFixed(2)}% confidence`
+      normalizedResult.confidence === null
+        ? `${normalizedResult.label} - confidence unavailable`
+        : `${normalizedResult.label} - ${normalizedResult.confidence.toFixed(2)}% predicted-class confidence`
     );
   } catch (error) {
     const message =
-      error.message ||
+      (error instanceof Error ? error.message : String(error || '')) ||
       'Could not connect to Truth Matrix. Make sure the FastAPI backend is running.';
 
     const errorState = {

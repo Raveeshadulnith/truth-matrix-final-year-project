@@ -1,6 +1,14 @@
-const API_BASE_URL   = 'http://127.0.0.1:8000';
 const STORAGE_KEY    = 'truthMatrixAnalysisState';
 const HISTORY_KEY    = 'truthMatrixAnalysisHistory';
+
+const {
+  API_BASE_URL,
+  escapeHtml: esc,
+  normalizeAnalysisState,
+  normalizeHistory,
+  renderModelResultHtml,
+  renderForensicSummaryHtml,
+} = globalThis.TruthMatrixExtension;
 
 const statusContainer  = document.getElementById('statusContainer');
 const historyContainer = document.getElementById('historyContainer');
@@ -12,13 +20,6 @@ let latestState   = null;
 let latestHistory = [];
 
 /* ── helpers ─────────────────────────────────────────── */
-function esc(v) {
-  return String(v ?? '')
-    .replaceAll('&','&amp;').replaceAll('<','&lt;')
-    .replaceAll('>','&gt;').replaceAll('"','&quot;')
-    .replaceAll("'",'&#039;');
-}
-
 function truncateUrl(url) {
   if (!url) return 'No image URL';
   try {
@@ -33,18 +34,7 @@ function formatTime(v) {
   return new Intl.DateTimeFormat(undefined, { hour:'2-digit', minute:'2-digit' }).format(new Date(v));
 }
 
-function getHeatmapUrl(u) {
-  if (!u) return null;
-  if (u.startsWith('http://') || u.startsWith('https://')) return u;
-  return u.startsWith('/') ? `${API_BASE_URL}${u}` : `${API_BASE_URL}/${u}`;
-}
-
 function isDeepfake(result) { return result?.label === 'Suspected Deepfake'; }
-
-function probabilityText(value) {
-  const num = Number(value);
-  return Number.isFinite(num) ? `${Math.max(0, Math.min(100, num)).toFixed(1)}%` : '—';
-}
 
 /* ── empty ───────────────────────────────────────────── */
 function renderEmptyState() {
@@ -98,7 +88,7 @@ function renderLoadingState(state) {
 function renderErrorState(state) {
   const err = state?.error || 'Something went wrong during analysis.';
   const imgHtml = state?.imageUrl
-    ? `<div class="result-image-wrap" style="border-radius:14px;margin-bottom:12px;"><img src="${esc(state.imageUrl)}" alt="Analyzed image" /></div>`
+    ? `<div class="result-image-wrap error-image-wrap"><img src="${esc(state.imageUrl)}" alt="Analyzed image" /></div>`
     : '';
 
   statusContainer.innerHTML = `
@@ -113,41 +103,32 @@ function renderErrorState(state) {
       </div>
       <h2>Analysis failed</h2>
       <p>${esc(err)}</p>
-      <div class="error-hint">Make sure FastAPI is running at <strong>http://127.0.0.1:8000</strong>, then try again.</div>
+      <div class="error-hint">Make sure FastAPI is running at <strong>${esc(API_BASE_URL)}</strong>, then try again.</div>
     </div>`;
 }
 
 /* ── result ──────────────────────────────────────────── */
 function renderResultState(state) {
   const result     = state.result;
-  const imageUrl   = state.imageUrl;
-  const confidence = Math.max(0, Math.min(100, Number(result.confidence || 0)));
-  const confText   = confidence.toFixed(1);
+  const confidence = typeof result.confidence === 'number' && Number.isFinite(result.confidence)
+    ? Math.max(0, Math.min(100, result.confidence))
+    : null;
+  const confText   = confidence === null ? '—' : confidence.toFixed(1);
   const fake       = isDeepfake(result);
-  const heatUrl    = getHeatmapUrl(result.xai_panel_url || result.xai_overlay_url || result.heatmap_url);
-  const fakeProbText = probabilityText(result.fake_probability);
-  const authenticProbText = probabilityText(result.authentic_probability);
 
   /* SVG ring: circumference ≈ 2π×32 = 201 */
-  const dashOffset = 201 - (201 * confidence / 100);
+  const dashOffset = 201 - (201 * (confidence ?? 0) / 100);
   const ringClass  = fake ? 'deepfake' : 'authentic';
   const chipClass  = fake ? 'deepfake' : 'authentic';
   const chipLabel  = esc(result.label);
-  const verdictTitle = fake ? 'Manipulation signals detected' : 'Authenticity signals detected';
+  const verdictTitle = fake ? 'AI-generated / fake class predicted' : 'Authentic / real class predicted';
   const verdictSub   = fake
-    ? 'Review carefully before trusting or sharing.'
-    : 'No strong deepfake signal detected by the model.';
+    ? 'This is a model classification, not proof of a particular editing technique.'
+    : 'The model assigned the image to its authentic/real class.';
 
-  const reportText = `Truth Matrix: ${result.label} (${confText}% confidence). ${result.explanation || ''}`;
 
   statusContainer.innerHTML = `
     <div class="panel result-panel anim-in">
-      ${imageUrl ? `
-        <div class="result-image-wrap">
-          <img src="${esc(imageUrl)}" alt="Analyzed image" />
-          <span class="img-tag">Analyzed source</span>
-        </div>` : ''}
-
       <div class="result-body">
         <div class="verdict-row">
           <div class="verdict-left">
@@ -162,61 +143,18 @@ function renderResultState(state) {
             <svg width="76" height="76" viewBox="0 0 76 76">
               <circle class="ring-track" cx="38" cy="38" r="32"/>
               <circle class="ring-fill ${ringClass}" cx="38" cy="38" r="32"
-                style="stroke-dashoffset:${dashOffset.toFixed(2)}"/>
+                stroke-dashoffset="${dashOffset.toFixed(2)}"/>
             </svg>
             <div class="ring-label">
               <span class="ring-val">${confText}</span>
-              <span class="ring-pct">% conf</span>
+              <span class="ring-pct">${confidence === null ? 'not stored' : '% class conf'}</span>
             </div>
           </div>
         </div>
 
-        <div class="metric-row">
-          <div class="metric-box">
-            <span class="metric-label">Media type</span>
-            <span class="metric-value">${esc(result.media_type || 'image')}</span>
-          </div>
-          <div class="metric-box">
-            <span class="metric-label">Confidence</span>
-            <span class="metric-value">${confText}%</span>
-          </div>
-          <div class="metric-box">
-            <span class="metric-label">Deepfake probability</span>
-            <span class="metric-value">${esc(fakeProbText)}</span>
-          </div>
-          <div class="metric-box">
-            <span class="metric-label">Authentic probability</span>
-            <span class="metric-value">${esc(authenticProbText)}</span>
-          </div>
-        </div>
+        ${renderModelResultHtml(result)}
+        ${renderForensicSummaryHtml(result.forensic_summary)}
 
-        <div class="explain-box">
-          <span class="section-tag">AI Explanation</span>
-          <p>${esc(result.explanation || 'No explanation was returned by the backend.')}</p>
-        </div>
-
-        ${heatUrl ? `
-          <div class="heatmap-box">
-            <span class="section-tag">XAI Heatmap${result.xai_target_class ? ` (${esc(String(result.xai_target_class).replaceAll('_', ' '))})` : ''}</span>
-            <img src="${esc(heatUrl)}" alt="Truth Matrix heatmap" />
-            <button class="heatmap-open" data-action="open" data-url="${esc(heatUrl)}" type="button">Open heatmap</button>
-          </div>` : `
-          <div class="heatmap-box no-heat">
-            <span class="section-tag">XAI Heatmap</span>
-            <p>No Grad-CAM heatmap was returned. Make sure XAI heatmaps are enabled in the backend, then reanalyze.</p>
-          </div>`}
-
-        <div class="quick-actions">
-          <button class="action-btn" data-action="copy" data-report="${esc(reportText)}">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            Copy result
-          </button>
-          ${imageUrl ? `
-          <button class="action-btn" data-action="open" data-url="${esc(imageUrl)}">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-            Open image
-          </button>` : ''}
-        </div>
       </div>
     </div>`;
 }
@@ -227,7 +165,9 @@ function renderHistory(history) {
 
   const items = history.map((item, i) => {
     const label = item.result?.label || 'Failed';
-    const conf  = item.result?.confidence ? `${Number(item.result.confidence).toFixed(1)}%` : '—';
+    const conf  = typeof item.result?.confidence === 'number'
+      ? `${item.result.confidence.toFixed(1)}%`
+      : '—';
     const cls   = item.status === 'error' ? 'error' : isDeepfake(item.result) ? 'deepfake' : 'authentic';
     return `
       <button class="history-item" data-index="${i}" type="button">
@@ -253,7 +193,8 @@ function renderHistory(history) {
 
 /* ── state machine ───────────────────────────────────── */
 function renderState(state) {
-  latestState = state || null;
+  state = normalizeAnalysisState(state);
+  latestState = state;
   reanalyzeButton.disabled = !(state?.imageUrl && state.status !== 'loading');
 
   if (!state?.status)              { renderEmptyState();       return; }
@@ -265,8 +206,17 @@ function renderState(state) {
 
 function loadState() {
   chrome.storage.local.get([STORAGE_KEY, HISTORY_KEY], (items) => {
-    latestHistory = Array.isArray(items[HISTORY_KEY]) ? items[HISTORY_KEY] : [];
-    renderState(items[STORAGE_KEY]);
+    const state = normalizeAnalysisState(items[STORAGE_KEY]);
+    latestHistory = normalizeHistory(items[HISTORY_KEY]);
+    const updates = {};
+    if (state && JSON.stringify(state) !== JSON.stringify(items[STORAGE_KEY])) {
+      updates[STORAGE_KEY] = state;
+    }
+    if (JSON.stringify(latestHistory) !== JSON.stringify(items[HISTORY_KEY] || [])) {
+      updates[HISTORY_KEY] = latestHistory;
+    }
+    if (Object.keys(updates).length) chrome.storage.local.set(updates);
+    renderState(state);
     renderHistory(latestHistory);
   });
 }
@@ -294,11 +244,14 @@ clearButton.addEventListener('click', async () => {
 statusContainer.addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-action]');
   if (!btn) return;
-  if (btn.dataset.action === 'copy') {
-    await navigator.clipboard.writeText(btn.dataset.report || '');
-    const orig = btn.innerHTML;
-    btn.textContent = '✓ Copied!';
-    setTimeout(() => { btn.innerHTML = orig; }, 1400);
+  if (btn.dataset.action === 'copy' || btn.dataset.action === 'copy-hash') {
+    const text = btn.dataset.action === 'copy-hash'
+      ? btn.dataset.hash || ''
+      : btn.dataset.report || '';
+    const originalText = btn.textContent;
+    await navigator.clipboard.writeText(text);
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = originalText; }, 1400);
   }
   if (btn.dataset.action === 'open' && btn.dataset.url) {
     window.open(btn.dataset.url, '_blank', 'noopener,noreferrer');
@@ -317,8 +270,8 @@ document.addEventListener('DOMContentLoaded', loadState);
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes[HISTORY_KEY]) {
-    latestHistory = Array.isArray(changes[HISTORY_KEY].newValue) ? changes[HISTORY_KEY].newValue : [];
+    latestHistory = normalizeHistory(changes[HISTORY_KEY].newValue);
     renderHistory(latestHistory);
   }
-  if (changes[STORAGE_KEY]) renderState(changes[STORAGE_KEY].newValue);
+  if (changes[STORAGE_KEY]) renderState(normalizeAnalysisState(changes[STORAGE_KEY].newValue));
 });

@@ -1,14 +1,3 @@
-"""Video deepfake inference using the local Keras .h5 frame model.
-
-The configured model is:
-    ml/models/deepfake-detection-video-model1.h5
-
-This HDF5 model is a Keras Conv2D image classifier with a single sigmoid
-output. Video analysis samples frames from the uploaded video, runs the frame
-classifier on each sampled frame, aggregates the frame probabilities, and
-returns the same API contract used by the frontend.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -22,14 +11,17 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# This venv uses Python 3.14, so standalone Keras is the compatible loader here.
-# Standalone Keras can run this model on the already-installed PyTorch backend.
 os.environ.setdefault("KERAS_BACKEND", os.getenv("VIDEO_KERAS_BACKEND", "torch"))
 
 MODEL_PATH = Path(
     os.getenv(
         "VIDEO_KERAS_MODEL_PATH",
-        str(Path(__file__).resolve().parent / "models" / "deepfake-detection-video-model1.h5"),
+        str(
+            Path(__file__).resolve().parent
+            / "models"
+            / "Video-Detection"
+            / "deepfake-detection-video-model1.h5"
+        ),
     )
 )
 
@@ -47,7 +39,7 @@ _predict_lock = threading.Lock()
 
 
 class VideoInputError(ValueError):
-    """Raised when an uploaded file cannot be decoded as a usable video."""
+    pass
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -483,7 +475,6 @@ def analyze_video(
     segment_start_seconds: Optional[float] = None,
     segment_duration_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Analyze sampled RGB frames and return video-level probabilities."""
     model, model_input = _load_model()
     frames, metadata = _extract_frames(
         video_path,

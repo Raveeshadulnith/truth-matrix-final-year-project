@@ -1,131 +1,248 @@
-"""Image deepfake inference via the official TruthScan Python SDK."""
-
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Union
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-from truthscan.image_detection import ImageDetectionClient
+import torch
+from PIL import Image, ImageOps, UnidentifiedImageError
+from torch import nn
+from torchvision import transforms
+from transformers import CvtConfig, CvtForImageClassification
 
 logger = logging.getLogger(__name__)
 
-LABELS = ["Authentic", "Suspected Deepfake"]
-DEFAULT_FAKE_THRESHOLD = 0.70
-TRUTHSCAN_API_KEY = os.getenv(
-    "TRUTHSCAN_API_KEY",
-    "ts_live_v2_DH6zrcnrYWUVkJSzLAYL6uMXigPhkZ5VTgjDoSCYLDv7m0SgtNSVatopBSonPJ6bShqfIM7awjwGGmCJJZWv4zLZis8_mdI0ltSHcevosMvyKadJuQQUXmZrtOpNmni5pHR90aN_e46f9a",
+LABELS = ("Authentic", "Suspected Deepfake")
+MODEL_VERSION = "cvt-13-model_epoch_24"
+MODEL_ENV_VAR = "IMAGE_MODEL_WEIGHTS_PATH"
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_WEIGHTS_PATH = (
+    Path(__file__).resolve().parent
+    / "models"
+    / "Image-Detection"
+    / "models"
+    / "model_epoch_24.pth"
 )
-TRUTHSCAN_ORGANIZATION_ID = os.getenv(
-    "TRUTHSCAN_ORGANIZATION_ID",
-    "7046cff0-9684-4880-be13-668f41a1252b",
+
+_PREPROCESS = transforms.Compose(
+    [
+        transforms.Resize((200, 200), antialias=True),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+        ),
+    ]
 )
 
 
-def _fake_threshold() -> float:
-    configured = os.getenv("IMAGE_FAKE_THRESHOLD", str(DEFAULT_FAKE_THRESHOLD)).strip()
+@dataclass(frozen=True)
+class _ModelBundle:
+    model: nn.Module
+    device: torch.device
+    weights_path: Path
+
+
+_MODEL_BUNDLE: _ModelBundle | None = None
+_MODEL_LOCK = threading.Lock()
+
+
+class ImageModelUnavailableError(RuntimeError):
+    pass
+
+
+class InvalidImageError(ValueError):
+    pass
+
+
+class CvtBinaryClassifier(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(384, 256)
+        self.mish1 = nn.Mish(inplace=False)
+        self.norm1 = nn.BatchNorm1d(256)
+        self.dropout1 = nn.Dropout(p=0.5)
+        self.fc2 = nn.Linear(256, 128)
+        self.mish2 = nn.Mish(inplace=False)
+        self.norm2 = nn.BatchNorm1d(128)
+        self.dropout2 = nn.Dropout(p=0.3)
+        self.fc_out = nn.Linear(128, 2)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        features = self.dropout1(self.norm1(self.mish1(self.fc1(features))))
+        features = self.dropout2(self.norm2(self.mish2(self.fc2(features))))
+        return self.fc_out(features)
+
+
+def build_cvt13_binary_model() -> CvtForImageClassification:
+    config = CvtConfig(num_labels=2)
+    model = CvtForImageClassification(config)
+    model.classifier = CvtBinaryClassifier()
+    return model
+
+
+def _configured_weights_path() -> Path:
+    configured = os.getenv(MODEL_ENV_VAR, "").strip()
+    if not configured:
+        return DEFAULT_WEIGHTS_PATH.resolve()
+
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = BACKEND_DIR / path
+    return path.resolve()
+
+
+def _select_device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _load_model_bundle(weights_path: Path) -> _ModelBundle:
+    if not weights_path.is_file():
+        raise ImageModelUnavailableError(
+            f"CvT-13 image model checkpoint was not found: {weights_path}. "
+            f"Set {MODEL_ENV_VAR} to the model_epoch_24.pth location."
+        )
+
+    device = _select_device()
+    model = build_cvt13_binary_model()
+
     try:
-        threshold = float(configured)
-    except ValueError:
-        logger.warning(
-            "[image_inference] Invalid IMAGE_FAKE_THRESHOLD=%r; using %.2f",
-            configured,
-            DEFAULT_FAKE_THRESHOLD,
-        )
-        return DEFAULT_FAKE_THRESHOLD
+        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise ImageModelUnavailableError(
+            f"Could not read the CvT-13 image model checkpoint at {weights_path}: {exc}"
+        ) from exc
 
-    if not 0.50 <= threshold <= 0.95:
-        logger.warning(
-            "[image_inference] IMAGE_FAKE_THRESHOLD must be between 0.50 and 0.95; "
-            "using %.2f",
-            DEFAULT_FAKE_THRESHOLD,
-        )
-        return DEFAULT_FAKE_THRESHOLD
-
-    return threshold
-
-
-def _calibrate_fake_probability(raw_fake_prob: float, threshold: float) -> float:
-    raw_fake_prob = max(0.0, min(1.0, raw_fake_prob))
-
-    if raw_fake_prob < threshold:
-        return 0.5 * (raw_fake_prob / threshold)
-
-    remaining = max(1e-8, 1.0 - threshold)
-    return 0.5 + 0.5 * ((raw_fake_prob - threshold) / remaining)
-
-
-def _build_explanation(final_result: str, fake_prob: float) -> str:
-    result_text = str(final_result or "Unknown").strip()
-    if result_text.lower() in {"ai-generated", "digitally edited", "ai-edited", "suspected deepfake"}:
-        return (
-            "The TruthScan API classified the image as manipulated or digitally edited. "
-            f"The reported confidence is {fake_prob:.1%}."
+    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+        raise ImageModelUnavailableError(
+            "The CvT-13 checkpoint is incompatible: expected a mapping containing "
+            "'model_state_dict'."
         )
 
-    return (
-        "The TruthScan API classified the image as authentic or not strongly manipulated. "
-        f"The reported confidence is {fake_prob:.1%}."
-    )
-
-
-def _result_label(final_result: str) -> str:
-    normalized = str(final_result or "").strip().lower()
-    if normalized in {"real", "authentic", "clean"}:
-        return LABELS[0]
-
-    return LABELS[1]
-
-
-def analyze_image(image_path: str) -> Dict[str, Union[str, float, None]]:
-    """
-    Run image deepfake detection through the official TruthScan SDK client.
-    """
     try:
-        if not TRUTHSCAN_API_KEY:
-            raise RuntimeError("TRUTHSCAN_API_KEY is required for image detection")
+        model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ImageModelUnavailableError(
+            "The CvT-13 checkpoint is incompatible with the configured model "
+            f"architecture: {exc}"
+        ) from exc
 
-        client = ImageDetectionClient(api_key=TRUTHSCAN_API_KEY)
-        detection_result = client.detect(
-            image_path,
-            generate_preview=False,
-            max_poll_attempts=60,
-            poll_interval_seconds=0.5,
+    model.to(device)
+    model.eval()
+    logger.info("Loaded local %s image model on %s", MODEL_VERSION, device)
+    return _ModelBundle(model=model, device=device, weights_path=weights_path)
+
+
+def _get_model_bundle() -> _ModelBundle:
+    global _MODEL_BUNDLE
+
+    weights_path = _configured_weights_path()
+    if _MODEL_BUNDLE is not None and _MODEL_BUNDLE.weights_path == weights_path:
+        return _MODEL_BUNDLE
+
+    with _MODEL_LOCK:
+        if _MODEL_BUNDLE is None or _MODEL_BUNDLE.weights_path != weights_path:
+            _MODEL_BUNDLE = _load_model_bundle(weights_path)
+        return _MODEL_BUNDLE
+
+
+def get_image_model_readiness() -> dict[str, Any]:
+    bundle = _get_model_bundle()
+    return {
+        "status": "ready",
+        "model_version": MODEL_VERSION,
+        "device": bundle.device.type,
+        "loaded": True,
+    }
+
+
+def _reset_model_cache_for_tests() -> None:
+    global _MODEL_BUNDLE
+    with _MODEL_LOCK:
+        _MODEL_BUNDLE = None
+
+
+def _preprocess_image(image_path: Path) -> torch.Tensor:
+    if not image_path.is_file():
+        raise FileNotFoundError(f"Image file was not found: {image_path}")
+
+    try:
+        with Image.open(image_path) as image:
+            image.load()
+            rgb_image = ImageOps.exif_transpose(image).convert("RGB")
+            return _PREPROCESS(rgb_image).unsqueeze(0)
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise InvalidImageError(
+            f"Invalid or unreadable image file: {image_path.name}"
+        ) from exc
+
+
+def _prediction_result(probabilities: torch.Tensor) -> dict[str, Any]:
+    if probabilities.ndim != 1 or probabilities.numel() != 2:
+        raise RuntimeError(
+            "The CvT-13 image model returned an invalid probability tensor; "
+            "expected exactly two classes."
         )
 
-        raw_probability = float(detection_result.get("result") or 0.0)
-        result_details = detection_result.get("result_details") or {}
-        final_result = result_details.get("final_result") or "Unknown"
-        label = _result_label(final_result)
+    authentic_probability = float(probabilities[0].item())
+    fake_probability = float(probabilities[1].item())
+    predicted_class = int(torch.argmax(probabilities).item())
+    label = LABELS[predicted_class]
+    confidence = authentic_probability if predicted_class == 0 else fake_probability
 
-        threshold = _fake_threshold()
-        fake_prob = _calibrate_fake_probability(
-            max(0.0, min(100.0, raw_probability)) / 100.0,
-            threshold,
+    if predicted_class == 0:
+        explanation = (
+            "The local CvT-13 image model found stronger evidence that this image "
+            "belongs to the real-image class."
         )
-        authentic_prob = 1.0 - fake_prob
+    else:
+        explanation = (
+            "The local CvT-13 image model found stronger evidence that this image "
+            "belongs to the AI-generated image class."
+        )
 
-        confidence = round((fake_prob if label == LABELS[1] else authentic_prob) * 100, 2)
-        heatmap_url = result_details.get("heatmap_url")
+    return {
+        "media_type": "image",
+        "label": label,
+        "confidence": round(confidence * 100.0, 2),
+        "fake_probability": round(fake_probability * 100.0, 2),
+        "authentic_probability": round(authentic_probability * 100.0, 2),
+        "explanation": explanation,
+        "heatmap_url": None,
+        "xai_overlay_url": None,
+        "xai_panel_url": None,
+        "xai_method": None,
+        "xai_target_class": None,
+        "xai_predicted_class": None,
+        "xai_layer": None,
+        "xai_map_strength": None,
+        "xai_error": None,
+        "model_version": MODEL_VERSION,
+    }
 
-        return {
-            "media_type": "image",
-            "label": label,
-            "confidence": confidence,
-            "fake_probability": round(fake_prob * 100, 2),
-            "authentic_probability": round(authentic_prob * 100, 2),
-            "explanation": _build_explanation(final_result, fake_prob),
-            "heatmap_url": heatmap_url,
-            "xai_overlay_url": None,
-            "xai_method": "TruthScan SDK" if heatmap_url else None,
-            "xai_target_class": final_result,
-            "xai_predicted_class": final_result,
-            "xai_layer": None,
-            "xai_map_strength": None,
-            "xai_error": None,
-        }
+
+def analyze_image(image_path: str) -> dict[str, Any]:
+    path = Path(image_path)
+    try:
+        image_tensor = _preprocess_image(path)
+        bundle = _get_model_bundle()
+        image_tensor = image_tensor.to(bundle.device)
+
+        with torch.inference_mode():
+            logits = bundle.model(image_tensor).logits
+            probabilities = torch.softmax(logits, dim=1)[0].detach().cpu()
+
+        return _prediction_result(probabilities)
     except FileNotFoundError:
         raise
+    except InvalidImageError:
+        raise
+    except RuntimeError:
+        logger.exception("Local CvT-13 image analysis failed for %s", path)
+        raise
     except Exception as exc:
-        logger.exception("[image_inference] TruthScan SDK image detection failed for %s", image_path)
+        logger.exception("Local CvT-13 image analysis failed for %s", path)
         raise RuntimeError(f"Image analysis failed: {exc}") from exc

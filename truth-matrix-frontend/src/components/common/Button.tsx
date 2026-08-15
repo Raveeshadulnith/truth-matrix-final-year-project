@@ -1,5 +1,5 @@
 import React from 'react';
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import { Loader2Icon } from 'lucide-react';
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
@@ -22,9 +22,10 @@ export function Button({
   disabled,
   ...props
 }: ButtonProps) {
+  const reduceMotion = useReducedMotion();
   const baseStyles = `
     inline-flex items-center justify-center font-semibold rounded-xl
-    transition-all duration-200 ease-out
+    transition-all duration-200 ease-out motion-reduce:transition-none motion-reduce:hover:transform-none
     focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2
     disabled:opacity-50 disabled:cursor-not-allowed
   `;
@@ -65,9 +66,7 @@ export function Button({
   const glowStyles = glow ? 'animate-glow' : '';
   return (
     <motion.button
-      whileTap={{
-        scale: 0.98
-      }}
+      whileTap={reduceMotion ? undefined : { scale: 0.98 }}
       className={`${baseStyles} ${variants[variant]} ${sizes[size]} ${glowStyles} ${className}`}
       disabled={disabled || isLoading}
       {...props}>
