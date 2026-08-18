@@ -1,4 +1,3 @@
-import React from 'react';
 import type { ExtractorStatus, SimilarityMatch } from '../../api/deepfakeApi';
 import { formatDate } from '../../utils/formatters';
 import {

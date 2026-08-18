@@ -1,19 +1,69 @@
-import React from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   BellIcon,
   MonitorIcon,
   ShieldIcon,
   KeyIcon,
-  CreditCardIcon } from
+  } from
 'lucide-react';
 import { Card } from '../components/common/Card';
 import { Button } from '../components/common/Button';
 import { Badge } from '../components/common/Badge';
 import { ThemeToggle } from '../components/common/ThemeToggle';
+import { Input } from '../components/common/Input';
 import { useAuthStore } from '../store/authStore';
+import { disableMfa, getMfaStatus, startMfaStepUp, verifyMfaStepUp, type MfaStatusResponse } from '../api/deepfakeApi';
+import { isCompleteOtp, normalizeOtpCode } from '../utils/authSecurity';
 export function SettingsPage() {
-  const { user } = useAuthStore();
+  const { user, accessToken } = useAuthStore();
+  const [mfaStatus, setMfaStatus] = useState<MfaStatusResponse | null>(null);
+  const [securityStage, setSecurityStage] = useState<'idle' | 'password' | 'code'>('idle');
+  const [securityPassword, setSecurityPassword] = useState('');
+  const [securityCode, setSecurityCode] = useState('');
+  const [stepUpChallenge, setStepUpChallenge] = useState('');
+  const [securityMessage, setSecurityMessage] = useState('');
+  const [securityBusy, setSecurityBusy] = useState(false);
+
+  useEffect(() => {
+    if (accessToken) {
+      void getMfaStatus(accessToken).then(setMfaStatus).catch(() => setSecurityMessage('Could not load MFA status.'));
+    }
+  }, [accessToken]);
+
+  const beginDisable = async () => {
+    if (!accessToken) return;
+    setSecurityBusy(true);
+    setSecurityMessage('');
+    try {
+      const challenge = await startMfaStepUp(accessToken, securityPassword);
+      setStepUpChallenge(challenge.challenge_id);
+      setSecurityPassword('');
+      setSecurityStage('code');
+      setSecurityMessage(`A fresh verification code was sent to ${challenge.masked_destination}.`);
+    } catch (error) {
+      setSecurityMessage(error instanceof Error ? error.message : 'Verification failed.');
+    } finally {
+      setSecurityBusy(false);
+    }
+  };
+
+  const finishDisable = async () => {
+    if (!accessToken) return;
+    setSecurityBusy(true);
+    try {
+      const verified = await verifyMfaStepUp(accessToken, stepUpChallenge, securityCode);
+      await disableMfa(accessToken, verified.step_up_token);
+      setMfaStatus((current) => current ? { ...current, mfa_enabled: false } : current);
+      setSecurityStage('idle');
+      setSecurityCode('');
+      setSecurityMessage('MFA was disabled after recent password and MFA verification.');
+    } catch (error) {
+      setSecurityMessage(error instanceof Error ? error.message : 'Verification failed.');
+    } finally {
+      setSecurityBusy(false);
+    }
+  };
   return (
     <div className="min-h-screen py-8 px-4 sm:px-6 lg:px-8">
       <div className="max-w-3xl mx-auto space-y-8">
@@ -71,6 +121,43 @@ export function SettingsPage() {
                 </div>
                 <ThemeToggle showLabel />
               </div>
+            </div>
+          </Card>
+        </motion.div>
+
+        {/* Account security */}
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
+          <Card variant="default">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-5">
+                <div className="p-2 rounded-lg bg-neon-cyan/10"><ShieldIcon className="w-5 h-5 text-neon-cyan" /></div>
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Multi-factor authentication</h2>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Email security code protection for sign-in.</p>
+                </div>
+                <Badge variant={!mfaStatus ? 'default' : mfaStatus.mfa_enabled ? 'success' : 'warning'} size="sm">
+                  {!mfaStatus ? 'Loading' : mfaStatus.mfa_enabled ? 'Enabled' : 'Disabled'}
+                </Badge>
+              </div>
+              {mfaStatus?.required_by_policy && (
+                <p className="rounded-lg bg-neon-cyan/10 p-3 text-sm text-gray-700 dark:text-gray-300">MFA is required by the Truth Matrix security policy and cannot be disabled.</p>
+              )}
+              {securityMessage && <p role="status" className="my-3 text-sm text-gray-600 dark:text-gray-300">{securityMessage}</p>}
+              {mfaStatus?.disable_allowed && securityStage === 'idle' && (
+                <Button variant="danger" onClick={() => setSecurityStage('password')}>Disable MFA</Button>
+              )}
+              {securityStage === 'password' && (
+                <div className="space-y-3">
+                  <Input label="Current password" type="password" autoComplete="current-password" value={securityPassword} onChange={(event) => setSecurityPassword(event.target.value)} />
+                  <Button variant="danger" isLoading={securityBusy} disabled={!securityPassword} onClick={beginDisable}>Verify password</Button>
+                </div>
+              )}
+              {securityStage === 'code' && (
+                <div className="space-y-3">
+                  <Input label="Fresh MFA code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={securityCode} onChange={(event) => setSecurityCode(normalizeOtpCode(event.target.value))} />
+                  <Button variant="danger" isLoading={securityBusy} disabled={!isCompleteOtp(securityCode)} onClick={finishDisable}>Confirm MFA removal</Button>
+                </div>
+              )}
             </div>
           </Card>
         </motion.div>
@@ -190,7 +277,7 @@ export function SettingsPage() {
                       </Button>
                     </div>
                   </div>
-                  <Button variant="outline" className="w-full border-dashed">
+                  <Button variant="secondary" className="w-full border-dashed">
                     Generate New API Key
                   </Button>
                 </div>

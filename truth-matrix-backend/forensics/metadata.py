@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -638,6 +639,201 @@ def _run_ffprobe(
     return parsed
 
 
+def _discover_ffmpeg() -> Optional[str]:
+    executable = discover_executable("FFMPEG_PATH", ("ffmpeg", "ffmpeg.exe"))
+    if executable:
+        return executable
+    try:
+        import imageio_ffmpeg
+
+        bundled = Path(imageio_ffmpeg.get_ffmpeg_exe()).resolve()
+        return str(bundled) if bundled.is_file() else None
+    except (ImportError, OSError, RuntimeError):
+        return None
+
+
+def _split_ffmpeg_fields(value: str) -> List[str]:
+    fields: List[str] = []
+    current: List[str] = []
+    depth = 0
+    for character in value:
+        if character == "(":
+            depth += 1
+        elif character == ")" and depth:
+            depth -= 1
+        if character == "," and depth == 0:
+            fields.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+    if current:
+        fields.append("".join(current).strip())
+    return fields
+
+
+def _ffmpeg_duration_seconds(value: str) -> Optional[float]:
+    matched = re.fullmatch(r"(\d+):(\d+):(\d+(?:\.\d+)?)", value.strip())
+    if not matched:
+        return None
+    hours, minutes, seconds = matched.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _parse_ffmpeg_probe_header(header: str) -> Dict[str, Any]:
+    """Convert bounded FFmpeg input diagnostics into the ffprobe-shaped subset we use."""
+    header = header.split("Stream mapping:", 1)[0].split("Output #0", 1)[0]
+    input_match = re.search(r"^Input #0,\s*(.+?),\s+from ", header, re.MULTILINE)
+    if not input_match:
+        raise ValueError("FFmpeg did not return recognizable input metadata.")
+
+    format_name = input_match.group(1).strip()
+    format_long_names = {
+        "mov,mp4,m4a,3gp,3g2,mj2": "QuickTime / MOV / MP4",
+        "matroska,webm": "Matroska / WebM",
+        "avi": "AVI (Audio Video Interleaved)",
+    }
+    format_data: Dict[str, Any] = {
+        "format_name": format_name,
+        "format_long_name": format_long_names.get(format_name, format_name),
+    }
+    duration_match = re.search(
+        r"^\s*Duration:\s*([^,]+),.*?bitrate:\s*([\d.]+)\s*kb/s",
+        header,
+        re.MULTILINE,
+    )
+    if duration_match:
+        duration = _ffmpeg_duration_seconds(duration_match.group(1))
+        if duration is not None:
+            format_data["duration"] = duration
+        format_data["bit_rate"] = round(float(duration_match.group(2)) * 1000)
+
+    tags: Dict[str, str] = {}
+    for matched in re.finditer(
+        r"^\s{4,}([A-Za-z0-9_.-]+)\s*:\s*(\S.*?)\s*$",
+        header,
+        re.MULTILINE,
+    ):
+        key, value = matched.groups()
+        if key.casefold() not in {"duration", "stream", "metadata"}:
+            tags.setdefault(key, value)
+    if tags:
+        format_data["tags"] = tags
+
+    streams: List[Dict[str, Any]] = []
+    stream_pattern = re.compile(
+        r"^\s*Stream #0:(\d+)(?:\[[^\]]+\])?(?:\([^)]*\))?:\s*"
+        r"(Video|Audio|Data|Subtitle):\s*(.+)$",
+        re.MULTILINE,
+    )
+    for matched in stream_pattern.finditer(header):
+        index_text, kind, description = matched.groups()
+        fields = _split_ffmpeg_fields(description)
+        codec_field = fields[0] if fields else description
+        codec_match = re.match(r"([^\s,(]+)", codec_field)
+        profile_match = re.search(r"\(([^()/]+)\)", codec_field)
+        stream: Dict[str, Any] = {
+            "index": int(index_text),
+            "codec_type": kind.casefold(),
+            "codec_name": codec_match.group(1) if codec_match else None,
+        }
+        if profile_match:
+            stream["profile"] = profile_match.group(1).strip()
+
+        bit_rate_match = re.search(r"([\d.]+)\s*kb/s", description)
+        if bit_rate_match:
+            stream["bit_rate"] = round(float(bit_rate_match.group(1)) * 1000)
+
+        if kind == "Video":
+            dimension_match = re.search(
+                r"(?<![A-Za-z0-9])(\d{2,6})x(\d{2,6})(?![A-Za-z0-9])",
+                description,
+            )
+            if dimension_match:
+                stream["width"] = int(dimension_match.group(1))
+                stream["height"] = int(dimension_match.group(2))
+            fps_match = re.search(r"([\d.]+)\s*fps", description)
+            if fps_match:
+                stream["avg_frame_rate"] = float(fps_match.group(1))
+                stream["r_frame_rate"] = float(fps_match.group(1))
+            if len(fields) > 1:
+                pixel_format = fields[1].split("(", 1)[0].strip()
+                if pixel_format:
+                    stream["pix_fmt"] = pixel_format
+        elif kind == "Audio":
+            sample_rate_match = re.search(r"(\d+)\s*Hz", description)
+            if sample_rate_match:
+                stream["sample_rate"] = int(sample_rate_match.group(1))
+            if len(fields) > 2:
+                stream["channel_layout"] = fields[2]
+        streams.append({key: value for key, value in stream.items() if value is not None})
+
+    if not streams:
+        raise ValueError("FFmpeg did not report any media streams.")
+    return {"format": format_data, "streams": streams}
+
+
+def _run_ffmpeg_probe(
+    executable: str,
+    path: Path,
+    *,
+    timeout_seconds: float,
+    output_limit_bytes: int,
+) -> Dict[str, Any]:
+    """Probe the original input without writing, decoding, or re-encoding a video."""
+    arguments = [
+        executable,
+        "-hide_banner",
+        "-nostdin",
+        "-protocol_whitelist",
+        "file",
+        "-probesize",
+        str(
+            _env_int(
+                "FORENSIC_FFPROBE_PROBESIZE_BYTES",
+                DEFAULT_FFPROBE_PROBESIZE_BYTES,
+                32_768,
+                100_000_000,
+            )
+        ),
+        "-analyzeduration",
+        str(
+            _env_int(
+                "FORENSIC_FFPROBE_ANALYZE_DURATION_US",
+                DEFAULT_FFPROBE_ANALYZE_DURATION_US,
+                0,
+                60_000_000,
+            )
+        ),
+        "-i",
+        str(path),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-t",
+        "0",
+        "-f",
+        "null",
+        "-",
+    ]
+    output = _run_bounded_process(
+        arguments,
+        timeout_seconds=timeout_seconds,
+        output_limit_bytes=output_limit_bytes,
+    )
+    if output.timed_out:
+        raise TimeoutError("FFmpeg exceeded the metadata extraction timeout.")
+    if output.stdout_truncated or output.stderr_truncated:
+        raise ValueError("FFmpeg output exceeded the configured byte limit.")
+    if output.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed with exit code {output.returncode}.")
+    try:
+        header = output.stderr.decode("utf-8", errors="replace")
+    except (UnicodeDecodeError, RecursionError) as exc:
+        raise ValueError("FFmpeg returned malformed metadata output.") from exc
+    return _parse_ffmpeg_probe_header(header)
+
+
 def _bounded_pillow_value(
     value: Any,
     *,
@@ -1165,6 +1361,27 @@ def extract_metadata(
                 warnings.append(str(exc))
         else:
             warnings.append("ffprobe is unavailable.")
+
+        if "ffprobe" not in sources:
+            ffmpeg = _discover_ffmpeg()
+            if ffmpeg:
+                attempted_tools += 1
+                try:
+                    sources["ffprobe"] = _run_ffmpeg_probe(
+                        ffmpeg,
+                        path,
+                        timeout_seconds=timeout_seconds,
+                        output_limit_bytes=output_limit_bytes,
+                    )
+                    source_names.append("ffmpeg-fallback")
+                    warnings.append(
+                        "Container and stream metadata were collected with the bundled FFmpeg fallback."
+                    )
+                except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+                    failed_tools += 1
+                    warnings.append(str(exc))
+            else:
+                warnings.append("FFmpeg metadata fallback is unavailable.")
 
     if detected_mime_type in _IMAGE_MIME_TYPES and "exiftool" not in sources:
         attempted_tools += 1

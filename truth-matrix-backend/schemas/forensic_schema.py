@@ -401,6 +401,7 @@ class ForensicEvidence(ForensicContractModel):
     schema_version: Literal["1.0", "1.1", "1.2"] = "1.2"
     status: OverallForensicStatus
     file_identity_status: ExtractorStatus
+    original_filename: Optional[str] = Field(default=None, max_length=512)
     sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     file_size_bytes: Optional[int] = Field(default=None, ge=0)
     detected_mime_type: Optional[str] = None

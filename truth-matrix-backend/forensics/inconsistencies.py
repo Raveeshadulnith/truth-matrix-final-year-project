@@ -331,7 +331,11 @@ def classify_software_name(name: str) -> SoftwareCategory:
 
     def contains_marker(marker: str) -> bool:
         left_boundary = r"(?<!\w)" if marker[0].isalnum() else ""
-        right_boundary = r"(?!\w)" if marker[-1].isalnum() else ""
+        right_boundary = (
+            r"(?=\W|$|\d)"
+            if marker in {"lavf", "lavc"}
+            else r"(?!\w)" if marker[-1].isalnum() else ""
+        )
         return re.search(
             f"{left_boundary}{re.escape(marker)}{right_boundary}",
             normalized,

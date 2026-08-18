@@ -30,6 +30,8 @@ import { AboutPage } from './pages/AboutPage';
 import { HelpPage } from './pages/HelpPage';
 import { AdminDashboardPage } from './pages/AdminDashboardPage';
 import { NotFoundPage } from './pages/NotFoundPage';
+import { SessionTimeoutManager } from './components/auth/SessionTimeoutManager';
+import { LoadingSpinner } from './components/common/LoadingSpinner';
 
 const ProtectedRoute = ({
   children,
@@ -38,7 +40,11 @@ const ProtectedRoute = ({
   children: React.ReactNode;
   requireAdmin?: boolean;
 }) => {
-  const { isAuthenticated, user } = useAuthStore();
+  const { isAuthenticated, isInitialized, user } = useAuthStore();
+
+  if (!isInitialized) {
+    return <div className="min-h-screen flex items-center justify-center"><LoadingSpinner /></div>;
+  }
 
   if (!isAuthenticated) {
     return <Navigate to={ROUTES.LOGIN} replace />;
@@ -83,7 +89,7 @@ function AppShell() {
     videoSegment?: VideoSegmentSelection
   ) => {
     const toastId = toast.loading(
-      videoSegment ? 'Creating the selected clip locally...' : 'Uploading media...'
+      videoSegment ? 'Uploading the original video...' : 'Uploading media...'
     );
     try {
       await startUpload(file, videoSegment);
@@ -121,6 +127,8 @@ function AppShell() {
           },
         }}
       />
+
+      <SessionTimeoutManager />
 
       <Navbar />
 

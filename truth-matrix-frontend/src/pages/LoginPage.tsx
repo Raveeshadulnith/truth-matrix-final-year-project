@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { ShieldCheckIcon, MailIcon, LockIcon } from 'lucide-react';
@@ -7,13 +7,17 @@ import { Input } from '../components/common/Input';
 import { Card } from '../components/common/Card';
 import { useAuthStore } from '../store/authStore';
 import { ROUTES } from '../utils/constants';
+import { RecaptchaCheckbox } from '../components/auth/RecaptchaCheckbox';
+import { MfaChallengePanel } from '../components/auth/MfaChallengePanel';
 export function LoginPage() {
   const navigate = useNavigate();
-  const { login, isLoading, error, clearError } = useAuthStore();
+  const { login, isLoading, error, clearError, pendingChallenge } = useAuthStore();
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
+  const captchaCallback = useCallback((token: string | null) => setCaptchaToken(token), []);
   const [formData, setFormData] = useState({
     email: '',
-    password: '',
-    rememberMe: false
+    password: ''
   });
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const validateForm = () => {
@@ -35,10 +39,14 @@ export function LoginPage() {
     e.preventDefault();
     clearError();
     if (!validateForm()) return;
-    await login(formData.email, formData.password);
-    // Check if login was successful (no error set)
-    const { error: loginError, isAuthenticated } = useAuthStore.getState();
-    if (!loginError && isAuthenticated) {
+    if (!captchaToken) {
+      setFormErrors((current) => ({ ...current, captcha: 'Complete the CAPTCHA before signing in.' }));
+      return;
+    }
+    const result = await login(formData.email, formData.password, captchaToken);
+    setCaptchaToken(null);
+    setCaptchaReset((value) => value + 1);
+    if (result === 'authenticated') {
       navigate(ROUTES.DASHBOARD);
     }
   };
@@ -92,6 +100,9 @@ export function LoginPage() {
           </div>
 
           <Card variant="glass">
+            {pendingChallenge ? (
+              <MfaChallengePanel onSuccess={() => navigate(ROUTES.DASHBOARD)} />
+            ) : (
             <form onSubmit={handleSubmit} className="p-6 space-y-5">
               {/* Error Message */}
               {error &&
@@ -138,20 +149,8 @@ export function LoginPage() {
                 autoComplete="current-password" />
 
 
-              {/* Remember Me & Forgot Password */}
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    name="rememberMe"
-                    checked={formData.rememberMe}
-                    onChange={handleChange}
-                    className="w-4 h-4 rounded border-gray-300 text-neon-cyan focus:ring-neon-cyan" />
-
-                  <span className="text-sm text-gray-600 dark:text-gray-400">
-                    Remember me
-                  </span>
-                </label>
+              {/* Password recovery */}
+              <div className="flex items-center justify-end">
                 <Link
                   to={ROUTES.FORGOT_PASSWORD}
                   className="text-sm text-neon-cyan hover:underline font-medium">
@@ -160,17 +159,22 @@ export function LoginPage() {
                 </Link>
               </div>
 
+              <RecaptchaCheckbox onToken={captchaCallback} resetKey={captchaReset} />
+              {formErrors.captcha && <p className="text-sm text-neon-red">{formErrors.captcha}</p>}
+
               {/* Submit Button */}
               <Button
                 type="submit"
                 variant="primary"
                 size="lg"
                 className="w-full"
-                isLoading={isLoading}>
+                isLoading={isLoading}
+                disabled={!captchaToken}>
 
                 Sign In
               </Button>
             </form>
+            )}
           </Card>
 
           {/* Sign Up Link */}

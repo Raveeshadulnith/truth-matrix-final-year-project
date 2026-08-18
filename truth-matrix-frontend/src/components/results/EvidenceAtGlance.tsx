@@ -2,6 +2,9 @@ import { CheckCircle2Icon, FlaskConicalIcon, InfoIcon } from 'lucide-react';
 import type { ForensicEvidence, ForensicInsight } from '../../api/deepfakeApi';
 import { OriginHistoryCard } from '../forensics/OriginHistoryCard';
 import { ProvenanceCredentialsCard } from '../forensics/ProvenanceCredentialsCard';
+import { ForensicStatusBadge, WarningList } from '../forensics/ForensicPrimitives';
+import { evidenceStatusItems } from '../../utils/videoForensicPresentation';
+import { FileOverviewRow } from '../forensics/ForensicOverviewRows';
 
 function usefulFileInsights(evidence: ForensicEvidence): ForensicInsight[] {
   return (evidence.assessment?.key_insights ?? [])
@@ -78,6 +81,35 @@ function FileChecksCard({ evidence }: { evidence: ForensicEvidence }) {
   );
 }
 
+function EvidenceCollectionStatus({ evidence }: { evidence: ForensicEvidence }) {
+  const warnings = [...new Set([
+    ...evidence.warnings,
+    ...evidence.metadata.warnings,
+    ...evidence.c2pa.warnings,
+    ...evidence.perceptual_fingerprint.warnings,
+  ])];
+  return (
+    <section className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-navy-700 dark:bg-navy-800 sm:p-5" aria-labelledby="evidence-collection-heading">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 id="evidence-collection-heading" className="font-semibold text-gray-900 dark:text-white">Evidence collection status</h3>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Each extractor reports independently; unavailable evidence does not imply manipulation.</p>
+        </div>
+        <ForensicStatusBadge status={evidence.status} />
+      </div>
+      <dl className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {evidenceStatusItems(evidence).slice(1).map((item) => (
+          <div key={item.label} className="flex min-w-0 items-center justify-between gap-2 rounded-lg border border-gray-200 p-2.5 dark:border-navy-700">
+            <dt className="min-w-0 text-xs font-medium text-gray-600 dark:text-gray-300">{item.label}</dt>
+            <dd><ForensicStatusBadge status={item.status} /></dd>
+          </div>
+        ))}
+      </dl>
+      <WarningList warnings={warnings} />
+    </section>
+  );
+}
+
 export function EvidenceAtGlance({ evidence, isLoading, analysisId, canRevealPreciseLocation = false }: { evidence?: ForensicEvidence; isLoading: boolean; analysisId?: string; canRevealPreciseLocation?: boolean }) {
   if (isLoading) {
     return (
@@ -101,6 +133,8 @@ export function EvidenceAtGlance({ evidence, isLoading, analysisId, canRevealPre
 
   return (
     <div data-result-component="forensic-summary" className="space-y-4">
+      <EvidenceCollectionStatus evidence={evidence} />
+      <FileOverviewRow evidence={evidence} />
       <ProvenanceCredentialsCard c2pa={evidence.c2pa} />
       <div className="grid min-w-0 gap-4 lg:grid-cols-2">
         <FileChecksCard evidence={evidence} />

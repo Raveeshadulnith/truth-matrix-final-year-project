@@ -146,6 +146,31 @@ export function AnalysisResultHero({ analysis }: { analysis: Analysis }) {
           </div>
         ) : null}
 
+        {analysis.fileType === 'video' && analysis.videoMetadata ? (
+          <div className="mt-5 rounded-xl border border-gray-200 p-3 dark:border-navy-700">
+            <h2 className="text-sm font-semibold text-gray-900 dark:text-white">Original video sampling</h2>
+            <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+              {analysis.videoMetadata.analyzed_segment?.selection_applied
+                ? `Selected source interval ${analysis.videoMetadata.analyzed_segment.start_seconds.toFixed(3)}s–${analysis.videoMetadata.analyzed_segment.end_seconds?.toFixed(3) ?? '?'}s.`
+                : 'Frames were sampled across the complete original video.'}
+              {' '}Frame numbers are zero-based positions in the original upload.
+            </p>
+            {(analysis.videoMetadata.sampled_frames?.length ?? 0) > 0 ? (
+              <ol className="mt-3 grid max-h-40 gap-1.5 overflow-auto text-xs sm:grid-cols-2">
+                {analysis.videoMetadata.sampled_frames?.map((sample, index) => (
+                  <li key={`${sample.frame_number ?? 'time'}-${sample.timestamp_seconds ?? index}`} className="rounded-lg bg-gray-50 px-2.5 py-2 dark:bg-navy-900/60">
+                    {sample.frame_number != null ? `Frame #${sample.frame_number}` : `Sample #${index + 1}`}
+                    {sample.timestamp_seconds != null ? ` at ${sample.timestamp_seconds.toFixed(3)}s` : ''}
+                    {sample.fake_probability != null ? ` — ${sample.fake_probability.toFixed(1)}% fake class` : ''}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">Source-relative sample positions were not retained for this legacy result.</p>
+            )}
+          </div>
+        ) : null}
+
         <p className="mt-5 border-t border-gray-200 pt-4 text-xs text-gray-500 dark:border-navy-700 dark:text-gray-400">
           {limitation}
         </p>

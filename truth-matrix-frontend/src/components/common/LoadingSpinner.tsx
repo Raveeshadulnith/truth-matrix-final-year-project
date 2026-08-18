@@ -1,4 +1,3 @@
-import React from 'react';
 import { motion } from 'framer-motion';
 interface LoadingSpinnerProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';

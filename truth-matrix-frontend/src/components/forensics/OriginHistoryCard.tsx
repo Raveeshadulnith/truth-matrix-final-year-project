@@ -8,6 +8,12 @@ import type {
 } from '../../api/deepfakeApi';
 import { ApiError, getPreciseLocation } from '../../api/deepfakeApi';
 import { useAuthStore } from '../../store/authStore';
+import {
+  hasOriginDetails,
+  metadataStatusMessage,
+  videoMetadataFacts,
+} from '../../utils/videoForensicPresentation';
+import { ForensicStatusBadge, WarningList } from './ForensicPrimitives';
 
 const SOFTWARE_LABELS: Record<SoftwareCategory, string> = {
   capture_processing: 'Camera processing',
@@ -55,6 +61,7 @@ function DetailRow({
 
 export function OriginHistoryCard({
   creationInfo,
+  metadata,
   analysisId,
   canRevealPreciseLocation = false,
 }: {
@@ -70,11 +77,21 @@ export function OriginHistoryCard({
   const [locationError, setLocationError] = useState<string | null>(null);
   const [isLocationLoading, setIsLocationLoading] = useState(false);
   const [copied, setCopied] = useState(false);
-  const observations = creationInfo.software_observations ?? [];
+  const observations =
+    creationInfo.software_observations?.length
+      ? creationInfo.software_observations
+      : creationInfo.software.map((name) => ({
+          name,
+          category: 'unknown' as const,
+          source_tags: creationInfo.source_tags.software ?? [],
+          user_description: 'Embedded software or encoder metadata.',
+        }));
   const device = [creationInfo.device_make, creationInfo.device_model]
     .filter(Boolean)
     .join(' ');
-  const hasUsefulDetails = Boolean(device || creationInfo.created_at || observations.length > 0 || creationInfo.location_present);
+  const videoFacts = videoMetadataFacts(metadata);
+  const statusMessage = metadataStatusMessage(metadata);
+  const hasUsefulDetails = hasOriginDetails(creationInfo) || videoFacts.length > 0;
   const mayReveal = creationInfo.location_present && canRevealPreciseLocation && Boolean(analysisId);
   const coordinates = location?.status === 'available' && typeof location.latitude === 'number' && typeof location.longitude === 'number'
     ? `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`
@@ -132,13 +149,18 @@ export function OriginHistoryCard({
       aria-labelledby="origin-history-heading"
       className="min-w-0 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-navy-700 dark:bg-navy-800 sm:p-5"
     >
-      <h3 id="origin-history-heading" className="font-semibold text-gray-900 dark:text-white">
-        File origin details
-      </h3>
-      {!hasUsefulDetails ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">No useful origin details were embedded.</p> : null}
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <h3 id="origin-history-heading" className="font-semibold text-gray-900 dark:text-white">
+          File origin details
+        </h3>
+        <ForensicStatusBadge status={metadata.status} label={`Metadata ${metadata.status.replace(/_/g, ' ')}`} />
+      </div>
+      {statusMessage ? <p role="status" className="mt-2 text-sm text-amber-800 dark:text-amber-300">{statusMessage}</p> : null}
+      {!hasUsefulDetails && metadata.status === 'available' ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Metadata was examined, but no useful origin details were embedded.</p> : null}
 
       <dl className="mt-3 divide-y divide-gray-100 dark:divide-navy-700">
         {device ? <DetailRow icon={SmartphoneIcon} label="Device">{device}</DetailRow> : null}
+        {creationInfo.creator ? <DetailRow icon={SmartphoneIcon} label="Creator">{creationInfo.creator}</DetailRow> : null}
         <DetailRow icon={Clock3Icon} label="Captured">
           <span>{creationInfo.created_at ? formatEmbeddedDate(creationInfo.created_at) : 'Capture time was not embedded'}</span>
           {creationInfo.created_at && !creationInfo.timezone_present ? (
@@ -147,6 +169,8 @@ export function OriginHistoryCard({
             </span>
           ) : null}
         </DetailRow>
+        {creationInfo.modified_at ? <DetailRow icon={Clock3Icon} label="Modified">{formatEmbeddedDate(creationInfo.modified_at)}</DetailRow> : null}
+        {creationInfo.digitized_at ? <DetailRow icon={Clock3Icon} label="Digitized">{formatEmbeddedDate(creationInfo.digitized_at)}</DetailRow> : null}
 
         {observations.map((observation) => (
           <DetailRow
@@ -187,12 +211,27 @@ export function OriginHistoryCard({
                   </button>
                 </span>
               ) : null}
-              {location && location.status !== 'available' ? <span role="status" className="mt-2 block text-xs font-normal text-gray-500 dark:text-gray-400">Precise location is {location.status.replaceAll('_', ' ')} for this saved analysis.</span> : null}
+              {location && location.status !== 'available' ? <span role="status" className="mt-2 block text-xs font-normal text-gray-500 dark:text-gray-400">Precise location is {location.status.replace(/_/g, ' ')} for this saved analysis.</span> : null}
               {locationError ? <span role="alert" className="mt-2 block text-xs font-normal text-red-700 dark:text-red-300">{locationError}</span> : null}
             </div>
           </DetailRow>
         ) : null}
       </dl>
+
+      {videoFacts.length > 0 ? (
+        <div className="mt-4 border-t border-gray-100 pt-4 dark:border-navy-700">
+          <h4 className="text-sm font-semibold text-gray-900 dark:text-white">Container and video stream</h4>
+          <dl className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
+            {videoFacts.map((fact) => (
+              <div key={fact.label} className="rounded-lg bg-gray-50 p-2.5 dark:bg-navy-900/60">
+                <dt className="text-xs text-gray-500 dark:text-gray-400">{fact.label}</dt>
+                <dd className="mt-1 break-words font-medium text-gray-900 dark:text-white">{fact.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      ) : null}
+      <WarningList warnings={metadata.warnings} />
     </section>
   );
 }

@@ -8,9 +8,10 @@ python-dotenv
 defusedxml>=0.7.1,<0.8
 cryptography>=43,<47
 pydantic
-supabase
+supabase>=2.31,<3
 PyJWT
 requests
+resend>=2.0,<3
 c2pa-python>=0.37.6,<0.38
 email-validator
 torch==2.12.0

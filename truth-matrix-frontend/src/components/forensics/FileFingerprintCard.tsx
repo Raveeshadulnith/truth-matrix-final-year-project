@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { CheckIcon, ClipboardIcon, FingerprintIcon } from 'lucide-react';
 import type { ForensicEvidence } from '../../api/deepfakeApi';
 import {

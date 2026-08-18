@@ -93,6 +93,36 @@ export const FEATURES = [
   eyebrow: 'Saved sessions'
 }];
 
+export const PRICING_PLANS = [
+  {
+    name: 'Free',
+    description: 'For occasional verification and evaluation.',
+    price: 0,
+    period: 'month',
+    features: ['10 analyses per month', 'Image and video analysis', 'Basic result history'],
+    cta: 'Get started',
+    popular: false,
+  },
+  {
+    name: 'Pro',
+    description: 'For professionals who verify media regularly.',
+    price: 19,
+    period: 'month',
+    features: ['500 analyses per month', 'Detailed forensic evidence', 'Priority processing'],
+    cta: 'Choose Pro',
+    popular: true,
+  },
+  {
+    name: 'Team',
+    description: 'For organizations with shared verification workloads.',
+    price: 49,
+    period: 'month',
+    features: ['2,000 analyses per month', 'Team administration', 'API access'],
+    cta: 'Choose Team',
+    popular: false,
+  },
+] as const;
+
 
 export const STATS = [
 { label: 'Images Analyzed', value: '2.4M+', icon: 'Image' },

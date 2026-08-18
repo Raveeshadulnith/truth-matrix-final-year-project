@@ -1,6 +1,8 @@
 import os
 from typing import Any, Dict, Optional
 
+import requests
+
 from services.supabase_service import (
     get_supabase_auth_client,
     get_user_profile,
@@ -71,19 +73,18 @@ def _auth_response(response: Any, full_name: Optional[str] = None) -> Dict[str, 
 
 
 def signup_user(full_name: str, email: str, password: str) -> Dict[str, Any]:
-    response = get_supabase_auth_client().auth.sign_up(
+    """Create the confirmed Supabase identity only after application OTP proof."""
+    from services.supabase_service import get_supabase_service_client
+
+    response = get_supabase_service_client().auth.admin.create_user(
         {
             "email": email,
             "password": password,
-            "options": {
-                "data": {
-                    "full_name": full_name,
-                }
-            },
+            "email_confirm": True,
+            "user_metadata": {"full_name": full_name},
         }
     )
-
-    return _auth_response(response, full_name)
+    return {"user": _attach_profile(_user_to_dict(getattr(response, "user", None)), full_name)}
 
 
 def login_user(email: str, password: str) -> Dict[str, Any]:
@@ -95,6 +96,28 @@ def login_user(email: str, password: str) -> Dict[str, Any]:
     )
 
     return _auth_response(response)
+
+
+def confirm_user_email(user_id: str) -> Dict[str, Any]:
+    from services.supabase_service import get_supabase_service_client
+
+    response = get_supabase_service_client().auth.admin.update_user_by_id(
+        user_id, {"email_confirm": True}
+    )
+    return _user_to_dict(getattr(response, "user", None))
+
+
+def get_admin_user(user_id: str) -> Dict[str, Any]:
+    from services.supabase_service import get_supabase_service_client
+
+    response = get_supabase_service_client().auth.admin.get_user_by_id(user_id)
+    return _user_to_dict(getattr(response, "user", None))
+
+
+def delete_admin_user(user_id: str) -> None:
+    from services.supabase_service import get_supabase_service_client
+
+    get_supabase_service_client().auth.admin.delete_user(user_id)
 
 
 def refresh_user_session(refresh_token: str) -> Dict[str, Any]:
@@ -115,3 +138,18 @@ def send_password_reset(email: str) -> None:
 def get_user_from_token(token: str) -> Dict[str, Any]:
     response = get_supabase_auth_client().auth.get_user(token)
     return _user_to_dict(getattr(response, "user", None))
+
+
+def sign_out_user(access_token: str) -> None:
+    """Revoke the Supabase refresh session; app registry handles JWT replay."""
+    from services.supabase_service import _require_env
+
+    response = requests.post(
+        f"{_require_env('SUPABASE_URL').rstrip('/')}/auth/v1/logout?scope=local",
+        headers={
+            "apikey": _require_env("SUPABASE_ANON_KEY"),
+            "Authorization": f"Bearer {access_token}",
+        },
+        timeout=5,
+    )
+    response.raise_for_status()

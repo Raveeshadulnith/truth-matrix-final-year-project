@@ -481,6 +481,7 @@ def collect_forensic_evidence(
             schema_version="1.2",
             status=_overall_status(identity, enabled_statuses),
             file_identity_status=identity.status,
+            original_filename=Path(original_filename).name if original_filename else None,
             sha256=identity.sha256,
             file_size_bytes=identity.file_size_bytes,
             detected_mime_type=identity.detected_mime_type,

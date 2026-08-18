@@ -1,14 +1,14 @@
-import React from 'react';
-import { motion, useReducedMotion } from 'framer-motion';
+import type { ReactNode } from 'react';
+import { motion, useReducedMotion, type HTMLMotionProps } from 'framer-motion';
 import { Loader2Icon } from 'lucide-react';
-interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+interface ButtonProps extends HTMLMotionProps<'button'> {
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
   size?: 'sm' | 'md' | 'lg';
   isLoading?: boolean;
-  leftIcon?: React.ReactNode;
-  rightIcon?: React.ReactNode;
+  leftIcon?: ReactNode;
+  rightIcon?: ReactNode;
   glow?: boolean;
-  children: React.ReactNode;
+  children: ReactNode;
 }
 export function Button({
   variant = 'primary',

@@ -8,6 +8,7 @@ env/
 # Environment variables and secrets
 .env
 .env.*
+!**/.env.example
 firebase-service-account.json
 *service-account*.json
 serviceAccountKey.json

@@ -88,6 +88,7 @@ export function ForensicTechnicalDetails({ evidence }: { evidence: ForensicEvide
         <section aria-labelledby="technical-file-heading">
           <h4 id="technical-file-heading" className="font-semibold text-gray-900 dark:text-white">File identity and fingerprints</h4>
           <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+            <div><dt className="text-gray-500">Original filename</dt><dd className="break-words">{evidence.original_filename ?? 'Unavailable'}</dd></div>
             <div><dt className="text-gray-500">Detected MIME type</dt><dd>{evidence.detected_mime_type ?? 'Unavailable'}</dd></div>
             <div><dt className="text-gray-500">Byte size</dt><dd>{evidence.file_size_bytes != null ? `${formatFileSize(evidence.file_size_bytes)} (${evidence.file_size_bytes.toLocaleString()} bytes)` : 'Unavailable'}</dd></div>
             <div><dt className="text-gray-500">Schema version</dt><dd>{evidence.schema_version}</dd></div>

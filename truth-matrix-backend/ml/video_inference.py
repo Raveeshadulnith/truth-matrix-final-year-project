@@ -218,12 +218,12 @@ def _read_frame_at(cap, frame_index: int) -> Optional[np.ndarray]:
 def _read_frames_sequentially(
     cap: cv2.VideoCapture,
     frame_indices: np.ndarray,
-) -> List[np.ndarray]:
+) -> List[Tuple[int, np.ndarray]]:
     if frame_indices.size == 0:
         return []
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_indices[0]))
-    frames: List[np.ndarray] = []
+    frames: List[Tuple[int, np.ndarray]] = []
     target_position = 0
     current_frame = int(frame_indices[0])
     final_frame = int(frame_indices[-1])
@@ -234,7 +234,7 @@ def _read_frames_sequentially(
             break
         target_frame = int(frame_indices[target_position])
         if current_frame >= target_frame and frame.size:
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            frames.append((current_frame, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
             target_position += 1
         current_frame += 1
 
@@ -266,7 +266,7 @@ def _stream_sample_frames(
     *,
     start_frame: int = 0,
     end_frame: Optional[int] = None,
-) -> Tuple[List[np.ndarray], int]:
+) -> Tuple[List[Tuple[int, np.ndarray]], int]:
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     samples: List[Tuple[int, np.ndarray]] = []
     seen = 0
@@ -278,20 +278,21 @@ def _stream_sample_frames(
         ok, frame = cap.read()
         if not ok or frame is None:
             break
+        frame_number = start_frame + seen
+        seen += 1
         if frame.size == 0:
             continue
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         if len(samples) < n:
-            samples.append((seen, rgb))
+            samples.append((frame_number, rgb))
         else:
-            replacement = int(random.integers(0, seen + 1))
+            replacement = int(random.integers(0, seen))
             if replacement < n:
-                samples[replacement] = (seen, rgb)
-        seen += 1
+                samples[replacement] = (frame_number, rgb)
 
     samples.sort(key=lambda item: item[0])
-    return [frame for _, frame in samples], seen
+    return samples, seen
 
 
 def _extract_frames(
@@ -316,6 +317,7 @@ def _extract_frames(
         fps = metadata["fps"]
         video_duration = metadata["duration_seconds"]
         frames: List[np.ndarray] = []
+        sampled_frames: List[Dict[str, Any]] = []
         segment_selected = (
             segment_start_seconds is not None and segment_duration_seconds is not None
         )
@@ -362,21 +364,31 @@ def _extract_frames(
                 np.linspace(start_frame, end_frame - 1, target_count, dtype=int)
             )
             if segment_selected:
-                frames = _read_frames_sequentially(cap, indices)
+                indexed_frames = _read_frames_sequentially(cap, indices)
+                frames = [frame for _, frame in indexed_frames]
+                sampled_frames = [
+                    {"frame_number": frame_number}
+                    for frame_number, _ in indexed_frames
+                ]
             else:
                 for index in indices:
                     frame = _read_frame_at(cap, int(index))
                     if frame is not None:
                         frames.append(frame)
+                        sampled_frames.append({"frame_number": int(index)})
             if len(frames) < target_count:
-                sequential_frames, _ = _stream_sample_frames(
+                indexed_frames, _ = _stream_sample_frames(
                     cap,
                     n,
                     start_frame=start_frame,
                     end_frame=end_frame,
                 )
-                if sequential_frames:
-                    frames = sequential_frames
+                if indexed_frames:
+                    frames = [frame for _, frame in indexed_frames]
+                    sampled_frames = [
+                        {"frame_number": frame_number}
+                        for frame_number, _ in indexed_frames
+                    ]
 
         if not frames and segment_selected and not isinstance(fps, float):
             sample_times = np.linspace(
@@ -389,14 +401,22 @@ def _extract_frames(
                 ok, frame = cap.read()
                 if ok and frame is not None and frame.size:
                     frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    sampled_frames.append(
+                        {"frame_number": None, "timestamp_seconds": round(float(sample_time), 6)}
+                    )
 
         if not frames:
-            frames, decoded_count = _stream_sample_frames(
+            indexed_frames, decoded_count = _stream_sample_frames(
                 cap,
                 n,
                 start_frame=start_frame,
                 end_frame=end_frame,
             )
+            frames = [frame for _, frame in indexed_frames]
+            sampled_frames = [
+                {"frame_number": frame_number}
+                for frame_number, _ in indexed_frames
+            ]
             if metadata["total_frames"] is None and decoded_count and not segment_selected:
                 metadata["total_frames"] = decoded_count
                 fps = metadata["fps"]
@@ -408,6 +428,13 @@ def _extract_frames(
 
         if metadata["width"] is None or metadata["height"] is None:
             metadata["height"], metadata["width"] = frames[0].shape[:2]
+        if isinstance(fps, float):
+            for sampled_frame in sampled_frames:
+                frame_number = sampled_frame["frame_number"]
+                if isinstance(frame_number, int):
+                    sampled_frame["timestamp_seconds"] = round(frame_number / fps, 6)
+        metadata["sampled_frame_number_base"] = 0
+        metadata["sampled_frames"] = sampled_frames
         return frames, metadata
     finally:
         cap.release()
@@ -493,6 +520,10 @@ def analyze_video(
         raise
 
     fake_prob = float(np.mean(frame_fake_probs))
+    for sampled_frame, frame_fake_prob in zip(
+        metadata.get("sampled_frames", []), frame_fake_probs
+    ):
+        sampled_frame["fake_probability"] = round(float(frame_fake_prob) * 100.0, 2)
     authentic_prob = 1.0 - fake_prob
     is_fake = fake_prob >= _fake_threshold()
     label = LABELS[1] if is_fake else LABELS[0]

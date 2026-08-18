@@ -24,12 +24,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from auth.auth_dependency import get_current_user
-from auth.auth_service import (
-    login_user,
-    refresh_user_session,
-    send_password_reset,
-    signup_user,
-)
+from auth.router import router as auth_router
+from auth.security_config import get_security_config
+from auth.security_middleware import SecurityHeadersMiddleware
 from forensics.orchestrator import collect_forensic_evidence
 from forensics.precise_location import (
     ENCRYPTION_VERSION,
@@ -60,14 +57,6 @@ from ml.image_inference import (
     get_image_model_readiness,
 )
 from ml.video_inference import VideoInputError, analyze_video
-from schemas.auth_schema import (
-    AuthResponse,
-    LoginRequest,
-    ProfileUpdateRequest,
-    RefreshRequest,
-    ResetPasswordRequest,
-    SignupRequest,
-)
 from schemas.forensic_schema import ForensicEvidence
 from schemas.response_schema import (
     AnalysisResponse,
@@ -82,10 +71,8 @@ from services.supabase_service import (
     get_analysis_result_by_id,
     get_sensitive_location_record,
     get_user_analysis_results,
-    get_user_profile,
     save_analysis_result,
     save_sensitive_location,
-    update_user_profile,
 )
 from utils.file_utils import (
     generate_temp_filename,
@@ -201,18 +188,24 @@ app = FastAPI(
     description="FastAPI backend for authenticated deepfake analysis and local file history.",
     version="1.0.0",
 )
+get_security_config().validate()
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 ALLOWED_ORIGINS = sorted(
     {
         FRONTEND_URL,
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
+        *{
+            origin.strip().rstrip("/")
+            for origin in os.getenv(
+                "ALLOWED_FRONTEND_ORIGINS",
+                "http://localhost:5173,http://127.0.0.1:5173",
+            ).split(",")
+            if origin.strip()
+        },
     }
 )
 
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -220,28 +213,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 
 app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
-
-
-def _auth_error_detail(exc: Exception) -> tuple[int, str]:
-    message = str(exc)
-    lower_message = message.lower()
-
-    if "email rate limit exceeded" in lower_message:
-        return (
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "Supabase is temporarily rate-limiting signup emails. Please wait a few minutes and try again, or disable email confirmations in Supabase Auth settings while developing locally.",
-        )
-
-    if "already registered" in lower_message or "already exists" in lower_message:
-        return (
-            status.HTTP_400_BAD_REQUEST,
-            "An account with this email already exists. Please sign in instead.",
-        )
-
-    return status.HTTP_400_BAD_REQUEST, f"Signup failed: {message}"
 
 
 @app.get("/")
@@ -284,109 +259,6 @@ async def audio_model_readiness(response: Response) -> Dict[str, Any]:
     return readiness
 
 
-@app.post("/api/auth/signup", response_model=AuthResponse)
-def signup(payload: SignupRequest) -> Dict[str, Any]:
-    try:
-        return signup_user(payload.full_name, payload.email, payload.password)
-    except Exception as exc:
-        error_status, detail = _auth_error_detail(exc)
-        raise HTTPException(
-            status_code=error_status,
-            detail=detail,
-        ) from exc
-
-
-@app.post("/api/auth/login", response_model=AuthResponse)
-def login(payload: LoginRequest) -> Dict[str, Any]:
-    try:
-        auth_response = login_user(payload.email, payload.password)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        ) from exc
-
-    if not auth_response.get("access_token"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Login did not return an access token. Check Supabase email confirmation settings.",
-        )
-
-    return auth_response
-
-
-@app.post("/api/auth/refresh", response_model=AuthResponse)
-def refresh_session(payload: RefreshRequest) -> Dict[str, Any]:
-    try:
-        auth_response = refresh_user_session(payload.refresh_token)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not refresh the session. Please sign in again.",
-        ) from exc
-
-    if not auth_response.get("access_token"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session refresh did not return an access token.",
-        )
-
-    return auth_response
-
-
-@app.post("/api/auth/reset-password")
-def reset_password(payload: ResetPasswordRequest) -> Dict[str, str]:
-    try:
-        send_password_reset(payload.email)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Password reset failed: {exc}",
-        ) from exc
-
-    return {"message": "Password reset email sent"}
-
-
-def _current_user_profile(current_user: Dict[str, Any]) -> Dict[str, Any]:
-    profile = get_user_profile(current_user["id"]) or {}
-    return {
-        "id": current_user["id"],
-        "email": profile.get("email") or current_user.get("email"),
-        "full_name": profile.get("full_name") or "",
-        "avatar_url": profile.get("avatar_url"),
-        "role": profile.get("role") or "user",
-        "created_at": profile.get("created_at"),
-        "updated_at": profile.get("updated_at"),
-    }
-
-
-@app.get("/api/auth/me")
-def read_me(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    return _current_user_profile(current_user)
-
-
-@app.put("/api/auth/profile")
-def update_profile(
-    payload: ProfileUpdateRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-) -> Dict[str, Any]:
-    try:
-        update_user_profile(
-            current_user["id"],
-            {
-                "full_name": payload.full_name,
-                "avatar_url": payload.avatar_url,
-            },
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Profile update failed: {exc}",
-        ) from exc
-
-    return _current_user_profile(current_user)
-
-
 def _create_temp_upload_path(filename: str) -> Path:
     extension = get_file_extension(filename)
     return UPLOAD_DIR / generate_temp_filename(extension)
@@ -398,6 +270,24 @@ def _persist_local_file(source_path: Path, *, destination_dir: Path, media_type:
     destination.parent.mkdir(parents=True, exist_ok=True)
     copy2(source_path, destination)
     return destination_name
+
+
+def _persist_analyzed_upload(
+    source_path: Path,
+    *,
+    destination_dir: Path,
+    media_type: str,
+    filename: str,
+) -> str:
+    """Keep an analyzed video at its original upload path without another copy."""
+    if media_type == "video":
+        return source_path.name
+    return _persist_local_file(
+        source_path,
+        destination_dir=destination_dir,
+        media_type=media_type,
+        filename=filename,
+    )
 
 
 def _build_local_download_url(destination_name: str, route: str) -> str:
@@ -457,6 +347,8 @@ def _prepare_record(
     }
     if analysis_id is not None:
         record["id"] = analysis_id
+    if media_type == "video" and analysis_result.get("video_metadata") is not None:
+        record["video_metadata"] = analysis_result["video_metadata"]
     return record
 
 
@@ -679,6 +571,7 @@ async def _analyze_upload(
 
     temp_path = _create_temp_upload_path(original_filename)
     private_locations: list[PreciseLocation] = []
+    retain_analyzed_upload = False
 
     try:
         bytes_written = await save_upload_file(
@@ -716,7 +609,7 @@ async def _analyze_upload(
         )
         local_upload_name = await run_in_threadpool(
             partial(
-                _persist_local_file,
+                _persist_analyzed_upload,
                 temp_path,
                 destination_dir=UPLOAD_DIR,
                 media_type=media_type,
@@ -782,6 +675,7 @@ async def _analyze_upload(
                     "precise location was not persisted",
                     extra={"analysis_id": analysis_id, "status": "unavailable"},
                 )
+        retain_analyzed_upload = media_type == "video"
         return _format_analysis_response(analysis_result, saved_record)
     except HTTPException:
         raise
@@ -809,7 +703,8 @@ async def _analyze_upload(
             detail=f"{media_type.capitalize()} analysis failed. Please try again.",
         ) from exc
     finally:
-        remove_file_if_exists(temp_path)
+        if not retain_analyzed_upload:
+            remove_file_if_exists(temp_path)
 
 
 @app.post("/api/analyze/image", response_model=AnalysisResponse)

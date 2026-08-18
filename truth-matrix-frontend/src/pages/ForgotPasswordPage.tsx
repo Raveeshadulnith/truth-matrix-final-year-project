@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -12,11 +12,15 @@ import { Input } from '../components/common/Input';
 import { Card } from '../components/common/Card';
 import { useAuthStore } from '../store/authStore';
 import { ROUTES } from '../utils/constants';
+import { RecaptchaCheckbox } from '../components/auth/RecaptchaCheckbox';
 export function ForgotPasswordPage() {
   const { resetPassword, isLoading, error, clearError } = useAuthStore();
   const [email, setEmail] = useState('');
   const [emailError, setEmailError] = useState('');
   const [submitted, setSubmitted] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
+  const captchaCallback = useCallback((token: string | null) => setCaptchaToken(token), []);
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     clearError();
@@ -29,7 +33,13 @@ export function ForgotPasswordPage() {
       setEmailError('Please enter a valid email');
       return;
     }
-    await resetPassword(email);
+    if (!captchaToken) {
+      setEmailError('Bot verification is still loading. Please try again.');
+      return;
+    }
+    await resetPassword(email, captchaToken);
+    setCaptchaToken(null);
+    setCaptchaReset((value) => value + 1);
     const { error: resetError } = useAuthStore.getState();
     if (!resetError) {
       setSubmitted(true);
@@ -61,7 +71,7 @@ export function ForgotPasswordPage() {
                   Check your email
                 </h1>
                 <p className="text-gray-600 dark:text-gray-400 mb-6">
-                  We've sent a password reset link to{' '}
+                  If an account exists, reset instructions will be sent to{' '}
                   <span className="font-medium text-gray-900 dark:text-white">
                     {email}
                   </span>
@@ -156,13 +166,16 @@ export function ForgotPasswordPage() {
                 leftIcon={<MailIcon className="w-5 h-5" />}
                 autoComplete="email" />
 
+              <RecaptchaCheckbox onToken={captchaCallback} resetKey={captchaReset} />
+
 
               <Button
                 type="submit"
                 variant="primary"
                 size="lg"
                 className="w-full"
-                isLoading={isLoading}>
+                isLoading={isLoading}
+                disabled={!captchaToken}>
 
                 Send Reset Link
               </Button>

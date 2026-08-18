@@ -17,6 +17,7 @@ import {
   type VideoMetadata,
 } from '../api/deepfakeApi';
 import { useAuthStore } from './authStore';
+import { selectAnalysisEvidence } from '../utils/analysisEvidenceMapping';
 
 export interface Analysis {
   id: string;
@@ -66,7 +67,7 @@ interface AnalysisState {
   uploadProgress: number;
   isAnalyzing: boolean;
   isHistoryLoading: boolean;
-  analysisStatus: 'idle' | 'trimming' | 'uploading' | 'processing' | 'complete' | 'error';
+  analysisStatus: 'idle' | 'uploading' | 'processing' | 'complete' | 'error';
   error: string | null;
 
   startUpload: (file: File, videoSegment?: VideoSegmentSelection) => Promise<void>;
@@ -374,22 +375,8 @@ export function mapBackendAnalysis(
       : undefined) ??
     savedRecord?.frames_analyzed) ??
     undefined;
-  const videoMetadata =
-    'video_metadata' in backendAnalysis
-      ? backendAnalysis.video_metadata || undefined
-      : undefined;
-  const forensicEvidence =
-    savedRecord?.forensic_evidence ??
-    ('forensic_evidence' in backendAnalysis
-      ? backendAnalysis.forensic_evidence ?? undefined
-      : undefined);
-  const modelForensicAlignment =
-    savedRecord?.model_forensic_alignment ??
-    ('model_forensic_alignment' in backendAnalysis
-      ? backendAnalysis.model_forensic_alignment ?? undefined
-      : undefined) ??
-    forensicEvidence?.assessment?.model_alignment ??
-    undefined;
+  const { forensicEvidence, videoMetadata, modelForensicAlignment } =
+    selectAnalysisEvidence(backendAnalysis, savedRecord);
   const artifacts = buildArtifacts({
     mediaType,
     result,
@@ -512,29 +499,19 @@ export const useAnalysisStore = create<AnalysisState>()(
         const fileType = getFileType(file);
         set({
           isAnalyzing: true,
-          analysisStatus:
-            fileType === 'video' && videoSegment ? 'trimming' : 'uploading',
-          uploadProgress: fileType === 'video' && videoSegment ? 0 : 10,
+          analysisStatus: 'uploading',
+          uploadProgress: 10,
           error: null,
         });
 
         const startTime = performance.now();
 
         try {
-          let uploadedFile = file;
-          if (fileType === 'video' && videoSegment) {
-            set({ uploadProgress: 5 });
-            const { trimVideoClip } = await import('../utils/videoClipper');
-            uploadedFile = await trimVideoClip(file, videoSegment, (progress) => {
-              set({ uploadProgress: 5 + Math.round(progress * 40) });
-            });
-          }
-
           const backendResult = await withAuthenticatedRequest((token) => {
             set({ analysisStatus: 'uploading', uploadProgress: 50 });
 
             if (fileType === 'video') {
-              return analyzeVideo(uploadedFile, token);
+              return analyzeVideo(file, token, videoSegment);
             }
 
             if (fileType === 'audio') {
@@ -544,24 +521,9 @@ export const useAnalysisStore = create<AnalysisState>()(
             return analyzeImage(file, token);
           });
           const analysis = mapBackendAnalysis(backendResult, {
-            file: uploadedFile,
+            file,
             processingTime: (performance.now() - startTime) / 1000,
           });
-
-          if (fileType === 'video' && videoSegment) {
-            analysis.videoMetadata = {
-              ...analysis.videoMetadata,
-              duration_seconds:
-                videoSegment.sourceDurationSeconds ??
-                analysis.videoMetadata?.duration_seconds,
-              analyzed_segment: {
-                start_seconds: videoSegment.startSeconds,
-                end_seconds: videoSegment.startSeconds + videoSegment.durationSeconds,
-                duration_seconds: videoSegment.durationSeconds,
-                selection_applied: true,
-              },
-            };
-          }
 
           set((state) => ({
             analyses: [

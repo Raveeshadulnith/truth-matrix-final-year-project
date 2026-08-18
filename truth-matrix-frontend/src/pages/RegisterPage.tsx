@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { toast } from 'sonner';
 import {
   ShieldCheckIcon,
   MailIcon,
@@ -15,9 +14,14 @@ import { Input } from '../components/common/Input';
 import { Card } from '../components/common/Card';
 import { useAuthStore } from '../store/authStore';
 import { ROUTES } from '../utils/constants';
+import { RecaptchaCheckbox } from '../components/auth/RecaptchaCheckbox';
+import { MfaChallengePanel } from '../components/auth/MfaChallengePanel';
 export function RegisterPage() {
   const navigate = useNavigate();
-  const { register, isLoading, error, clearError } = useAuthStore();
+  const { register, isLoading, error, clearError, pendingChallenge } = useAuthStore();
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
+  const captchaCallback = useCallback((token: string | null) => setCaptchaToken(token), []);
   const [formData, setFormData] = useState({
     fullName: '',
     email: '',
@@ -59,6 +63,8 @@ export function RegisterPage() {
       errors.password = 'Password is required';
     } else if (formData.password.length < 8) {
       errors.password = 'Password must be at least 8 characters';
+    } else if (!/[A-Z]/.test(formData.password) || !/[a-z]/.test(formData.password) || !/[0-9]/.test(formData.password)) {
+      errors.password = 'Password must contain uppercase, lowercase, and numeric characters';
     }
     if (formData.password !== formData.confirmPassword) {
       errors.confirmPassword = 'Passwords do not match';
@@ -73,18 +79,17 @@ export function RegisterPage() {
     e.preventDefault();
     clearError();
     if (!validateForm()) return;
+    if (!captchaToken) {
+      setFormErrors((current) => ({ ...current, captcha: 'Bot verification is still loading. Please try again.' }));
+      return;
+    }
     await register({
       fullName: formData.fullName,
       email: formData.email,
       password: formData.password
-    });
-    const { error: regError, isAuthenticated, message } = useAuthStore.getState();
-    if (!regError && isAuthenticated) {
-      navigate(ROUTES.DASHBOARD);
-    } else if (!regError) {
-      toast.success(message || 'Account created. Please sign in.');
-      navigate(ROUTES.LOGIN);
-    }
+    }, captchaToken);
+    setCaptchaToken(null);
+    setCaptchaReset((value) => value + 1);
   };
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value, type, checked } = e.target;
@@ -135,6 +140,9 @@ export function RegisterPage() {
           </div>
 
           <Card variant="glass">
+            {pendingChallenge ? (
+              <MfaChallengePanel onSuccess={() => navigate(ROUTES.DASHBOARD)} />
+            ) : (
             <form onSubmit={handleSubmit} className="p-6 space-y-5">
               {error &&
               <motion.div
@@ -265,17 +273,22 @@ export function RegisterPage() {
                 }
               </div>
 
+              <RecaptchaCheckbox onToken={captchaCallback} resetKey={captchaReset} />
+              {formErrors.captcha && <p className="text-sm text-neon-red">{formErrors.captcha}</p>}
+
               {/* Submit */}
               <Button
                 type="submit"
                 variant="primary"
                 size="lg"
                 className="w-full"
-                isLoading={isLoading}>
+                isLoading={isLoading}
+                disabled={!captchaToken}>
 
                 Create Account
               </Button>
             </form>
+            )}
           </Card>
 
           {/* Sign In Link */}

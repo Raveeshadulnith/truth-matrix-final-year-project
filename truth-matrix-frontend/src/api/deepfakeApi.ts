@@ -1,3 +1,5 @@
+import { createVideoAnalysisFormData } from './videoAnalysisForm';
+
 export const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 ).replace(/\/$/, '');
@@ -28,6 +30,12 @@ export interface VideoMetadata {
   width?: number | null;
   height?: number | null;
   total_frames?: number | null;
+  sampled_frame_number_base?: 0;
+  sampled_frames?: Array<{
+    frame_number: number | null;
+    timestamp_seconds?: number;
+    fake_probability?: number;
+  }>;
   analyzed_segment?: {
     start_seconds: number;
     end_seconds?: number | null;
@@ -267,7 +275,7 @@ export interface C2paEvidence {
   validation_errors: string[];
   provenance?: C2paProvenanceConclusion | null;
   remote_references_present?: boolean;
-  remote_fetch_performed?: false;
+  remote_fetch_performed?: boolean;
   raw_manifest?: JsonObject | null;
   warnings: string[];
 }
@@ -348,6 +356,7 @@ export interface ForensicEvidence {
   schema_version: '1.0' | '1.1' | '1.2';
   status: OverallForensicStatus;
   file_identity_status: ExtractorStatus;
+  original_filename?: string | null;
   sha256?: string | null;
   file_size_bytes?: number | null;
   detected_mime_type?: string | null;
@@ -367,9 +376,25 @@ export interface ForensicEvidence {
 }
 
 export interface AuthResponse {
-  access_token: string | null;
-  refresh_token: string | null;
+  access_token: string;
+  refresh_token: string;
   user: BackendUser;
+  assurance_level: 'aal1' | 'aal2';
+  idle_timeout_seconds: number;
+}
+
+export interface AuthChallengeResponse {
+  status: 'mfa_required';
+  challenge_id: string;
+  purpose: 'signup' | 'login' | 'step_up_disable_mfa';
+  expires_in: number;
+  masked_destination: string;
+}
+
+export interface MfaStatusResponse {
+  mfa_enabled: boolean;
+  required_by_policy: boolean;
+  disable_allowed: boolean;
 }
 
 export interface BackendModelResultFields {
@@ -392,6 +417,7 @@ export interface BackendAnalysisRecord extends BackendModelResultFields {
   xai_panel_url?: string | null;
   explanation?: string | null;
   frames_analyzed?: number | null;
+  video_metadata?: VideoMetadata | null;
   created_at?: string;
   xai_method?: string | null;
   xai_target_class?: string | null;
@@ -432,11 +458,13 @@ export interface BackendAnalysisResponse extends BackendModelResultFields {
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -450,7 +478,7 @@ async function readResponseBody(response: Response) {
   return response.text();
 }
 
-function getBackendErrorMessage(data: unknown, fallbackMessage: string) {
+function getBackendError(data: unknown, fallbackMessage: string) {
   const friendlyMessage = (message: string) => {
     if (message.toLowerCase().includes('email rate limit exceeded')) {
       return 'Supabase is temporarily rate-limiting signup emails. Please wait a few minutes and try again.';
@@ -460,36 +488,44 @@ function getBackendErrorMessage(data: unknown, fallbackMessage: string) {
   };
 
   if (!data) {
-    return fallbackMessage;
+    return { message: fallbackMessage, code: undefined as string | undefined };
   }
 
   if (typeof data === 'string') {
-    return data ? friendlyMessage(data) : fallbackMessage;
+    return { message: data ? friendlyMessage(data) : fallbackMessage, code: undefined };
   }
 
   if (typeof data === 'object' && data !== null) {
     const maybeError = data as {
-      detail?: string | Array<{ msg?: string; message?: string }>;
+      detail?: string | { code?: string; message?: string } | Array<{ msg?: string; message?: string }>;
       message?: string;
+      code?: string;
     };
 
     if (typeof maybeError.detail === 'string') {
-      return friendlyMessage(maybeError.detail);
+      return { message: friendlyMessage(maybeError.detail), code: maybeError.code };
+    }
+
+    if (maybeError.detail && !Array.isArray(maybeError.detail) && typeof maybeError.detail === 'object') {
+      return {
+        message: friendlyMessage(maybeError.detail.message || fallbackMessage),
+        code: maybeError.detail.code,
+      };
     }
 
     if (Array.isArray(maybeError.detail)) {
-      return maybeError.detail
+      return { message: maybeError.detail
         .map((item) => item.msg || item.message)
         .filter(Boolean)
-        .join(', ');
+        .join(', '), code: maybeError.code };
     }
 
     if (typeof maybeError.message === 'string') {
-      return friendlyMessage(maybeError.message);
+      return { message: friendlyMessage(maybeError.message), code: maybeError.code };
     }
   }
 
-  return fallbackMessage;
+  return { message: fallbackMessage, code: undefined };
 }
 
 async function apiRequest<T>(
@@ -511,7 +547,15 @@ async function apiRequest<T>(
   const data = await readResponseBody(response);
 
   if (!response.ok) {
-    throw new ApiError(getBackendErrorMessage(data, fallbackMessage), response.status);
+    const backendError = getBackendError(data, fallbackMessage);
+    if (
+      endpoint === '/api/auth/refresh' &&
+      backendError.code === 'SESSION_EXPIRED' &&
+      typeof window !== 'undefined'
+    ) {
+      window.dispatchEvent(new CustomEvent('truth-matrix-session-expired'));
+    }
+    throw new ApiError(backendError.message, response.status, backendError.code);
   }
 
   return data as T;
@@ -521,25 +565,25 @@ function authHeaders(accessToken?: string | null): HeadersInit {
   return accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
 }
 
-export function loginUser(email: string, password: string) {
-  return apiRequest<AuthResponse>(
+export function loginUser(email: string, password: string, captchaToken?: string | null) {
+  return apiRequest<AuthChallengeResponse | AuthResponse>(
     '/api/auth/login',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, captcha_token: captchaToken || null }),
     },
     'Invalid email or password.'
   );
 }
 
-export function registerUser(fullName: string, email: string, password: string) {
-  return apiRequest<AuthResponse>(
+export function registerUser(fullName: string, email: string, password: string, captchaToken: string) {
+  return apiRequest<AuthChallengeResponse>(
     '/api/auth/signup',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ full_name: fullName, email, password }),
+      body: JSON.stringify({ full_name: fullName, email, password, captcha_token: captchaToken }),
     },
     'Could not create your account.'
   );
@@ -557,13 +601,61 @@ export function refreshUserSession(refreshToken: string) {
   );
 }
 
-export function requestPasswordReset(email: string) {
+export function verifyMfaChallenge(
+  challengeId: string,
+  code: string,
+  password: string,
+  email: string,
+  fullName?: string
+) {
+  return apiRequest<AuthResponse>(
+    '/api/auth/mfa/verify',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        challenge_id: challengeId,
+        code,
+        password,
+        email,
+        full_name: fullName || null,
+      }),
+    },
+    'The verification code is invalid or expired.'
+  );
+}
+
+export function resendMfaChallenge(challengeId: string, email: string, captchaToken: string) {
+  return apiRequest<{ message: string; expires_in: number }>(
+    '/api/auth/mfa/resend',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ challenge_id: challengeId, email, captcha_token: captchaToken }),
+    },
+    'Could not resend the verification code.'
+  );
+}
+
+export function logoutUser(accessToken?: string | null, refreshToken?: string | null) {
+  return apiRequest<{ message: string }>(
+    '/api/auth/logout',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(accessToken) },
+      body: JSON.stringify({ refresh_token: refreshToken || null }),
+    },
+    'Could not contact the server while signing out.'
+  );
+}
+
+export function requestPasswordReset(email: string, captchaToken: string) {
   return apiRequest<{ message: string }>(
     '/api/auth/reset-password',
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email, captcha_token: captchaToken }),
     },
     'Could not send a password reset email.'
   );
@@ -628,9 +720,66 @@ export function analyzeImage(file: File, accessToken: string) {
 
 export function analyzeVideo(
   file: File,
-  accessToken: string
+  accessToken: string,
+  selection?: VideoSegmentSelection
 ) {
-  return uploadForAnalysis('/api/analyze/video', file, accessToken);
+  if (!file) {
+    throw new Error('Please select a file before analyzing.');
+  }
+
+  return apiRequest<BackendAnalysisResponse>(
+    '/api/analyze/video',
+    {
+      method: 'POST',
+      headers: authHeaders(accessToken),
+      body: createVideoAnalysisFormData(file, selection),
+    },
+    'Analysis failed. Please try again.'
+  );
+}
+
+export function getMfaStatus(accessToken: string) {
+  return apiRequest<MfaStatusResponse>(
+    '/api/auth/mfa/status',
+    { headers: authHeaders(accessToken) },
+    'Could not load MFA settings.'
+  );
+}
+
+export function startMfaStepUp(accessToken: string, password: string) {
+  return apiRequest<AuthChallengeResponse>(
+    '/api/auth/step-up/start',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(accessToken) },
+      body: JSON.stringify({ password }),
+    },
+    'Could not start security verification.'
+  );
+}
+
+export function verifyMfaStepUp(accessToken: string, challengeId: string, code: string) {
+  return apiRequest<{ step_up_token: string }>(
+    '/api/auth/step-up/verify',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(accessToken) },
+      body: JSON.stringify({ challenge_id: challengeId, code }),
+    },
+    'Could not verify the security code.'
+  );
+}
+
+export function disableMfa(accessToken: string, stepUpToken: string) {
+  return apiRequest<{ message: string }>(
+    '/api/auth/mfa/disable',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(accessToken) },
+      body: JSON.stringify({ step_up_token: stepUpToken }),
+    },
+    'Could not disable MFA.'
+  );
 }
 
 export function analyzeAudio(file: File, accessToken: string) {

@@ -1,9 +1,8 @@
-import React, { useState, createElement } from 'react';
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   SearchIcon,
-  FilterIcon,
   GridIcon,
   ListIcon,
   TrashIcon,
@@ -11,9 +10,6 @@ import {
   ImageIcon,
   VideoIcon,
   MusicIcon,
-  ShieldAlertIcon,
-  ShieldCheckIcon,
-  MoreVerticalIcon,
   CheckIcon } from
 'lucide-react';
 import { Button } from '../components/common/Button';
@@ -29,7 +25,7 @@ import {
 '../utils/formatters';
 export function HistoryPage() {
   const navigate = useNavigate();
-  const { analyses, setCurrentAnalysis, deleteAnalysis, clearHistory } =
+  const { analyses, setCurrentAnalysis, deleteAnalysis } =
   useAnalysisStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [filterResult, setFilterResult] = useState<'all' | 'fake' | 'real'>(

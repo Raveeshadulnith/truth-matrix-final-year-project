@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { XIcon } from 'lucide-react';
 import { useUIStore } from '../../store/uiStore';
@@ -20,10 +20,10 @@ export function Modal({
 }: ModalProps) {
   const { activeModal, closeModal } = useUIStore();
   const isOpen = activeModal === id;
-  const handleClose = () => {
+  const handleClose = useCallback(() => {
     closeModal();
     onClose?.();
-  };
+  }, [closeModal, onClose]);
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
@@ -38,7 +38,7 @@ export function Modal({
       document.body.style.overflow = '';
       window.removeEventListener('keydown', handleEscape);
     };
-  }, [isOpen]);
+  }, [handleClose, isOpen]);
   const sizes = {
     sm: 'max-w-sm',
     md: 'max-w-md',

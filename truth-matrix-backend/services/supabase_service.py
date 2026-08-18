@@ -8,7 +8,6 @@ from supabase import Client, create_client
 load_dotenv()
 
 _service_client: Optional[Client] = None
-_auth_client: Optional[Client] = None
 
 _FORENSIC_RESULT_COLUMNS = (
     "sha256",
@@ -21,6 +20,7 @@ _MODEL_RESULT_COLUMNS = (
     "fake_probability",
     "authentic_probability",
     "model_version",
+    "video_metadata",
 )
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MEDIA_TYPES = {"image", "video", "audio"}
@@ -49,14 +49,11 @@ def get_supabase_service_client() -> Client:
 
 
 def get_supabase_auth_client() -> Client:
-    """Anon client for normal Supabase Auth signup/login calls."""
-    global _auth_client
-    if _auth_client is None:
-        _auth_client = create_client(
-            _require_env("SUPABASE_URL"),
-            _require_env("SUPABASE_ANON_KEY"),
-        )
-    return _auth_client
+    """Return an isolated anon client so user auth state is never process-global."""
+    return create_client(
+        _require_env("SUPABASE_URL"),
+        _require_env("SUPABASE_ANON_KEY"),
+    )
 
 
 def _single_response_data(response: Any) -> Optional[Dict[str, Any]]:

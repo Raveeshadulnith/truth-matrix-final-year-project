@@ -56,6 +56,7 @@ create table public.analysis_results (
   model_version text,
   explanation text,
   frames_analyzed integer,
+  video_metadata jsonb,
   sha256 text,
   perceptual_fingerprint text,
   fingerprint_algorithm text,
@@ -86,6 +87,11 @@ create table public.analysis_results (
     ),
   constraint analysis_results_model_version_length_check
     check (model_version is null or char_length(model_version) <= 128),
+  constraint analysis_results_video_metadata_object_check
+    check (
+      video_metadata is null
+      or jsonb_typeof(video_metadata) = 'object'
+    ),
   constraint analysis_results_sha256_format_check
     check (sha256 is null or sha256 ~ '^[0-9a-f]{64}$'),
   constraint analysis_results_forensic_evidence_object_check

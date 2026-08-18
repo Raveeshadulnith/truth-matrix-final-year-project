@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -29,8 +29,8 @@ export function Navbar() {
 
     return !link.protected || isAuthenticated;
   });
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     navigate(ROUTES.HOME);
     setUserMenuOpen(false);
   };

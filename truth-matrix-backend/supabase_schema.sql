@@ -1,5 +1,7 @@
 ﻿-- Truth Matrix Supabase schema
--- Run this whole file in Supabase SQL Editor.
+-- Run this whole file in Supabase SQL Editor, then apply the timestamped
+-- migrations. Authentication security is defined in
+-- migrations/20260817_add_auth_security.sql.
 
 create extension if not exists "pgcrypto";
 
@@ -38,6 +40,7 @@ create table if not exists public.analysis_results (
   model_version text null,
   explanation text null,
   frames_analyzed integer null,
+  video_metadata jsonb null,
   sha256 text null,
   perceptual_fingerprint text null,
   fingerprint_algorithm text null,
@@ -59,6 +62,8 @@ create table if not exists public.analysis_results (
     ),
   constraint analysis_results_model_version_length_check
     check (model_version is null or char_length(model_version) <= 128),
+  constraint analysis_results_video_metadata_object_check
+    check (video_metadata is null or jsonb_typeof(video_metadata) = 'object'),
   constraint analysis_results_sha256_format_check
     check (sha256 is null or sha256 ~ '^[0-9a-f]{64}$'),
   constraint analysis_results_forensic_evidence_object_check
@@ -83,6 +88,7 @@ alter table public.analysis_results
   add column if not exists fake_probability numeric,
   add column if not exists authentic_probability numeric,
   add column if not exists model_version text,
+  add column if not exists video_metadata jsonb,
   add column if not exists sha256 text,
   add column if not exists perceptual_fingerprint text,
   add column if not exists fingerprint_algorithm text,
@@ -91,6 +97,17 @@ alter table public.analysis_results
 
 do $$
 begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'analysis_results_video_metadata_object_check'
+      and conrelid = 'public.analysis_results'::regclass
+  ) then
+    alter table public.analysis_results
+      add constraint analysis_results_video_metadata_object_check
+      check (video_metadata is null or jsonb_typeof(video_metadata) = 'object');
+  end if;
+
   if not exists (
     select 1
     from pg_constraint
@@ -292,3 +309,92 @@ drop trigger if exists set_user_profiles_updated_at on public.user_profiles;
 create trigger set_user_profiles_updated_at
 before update on public.user_profiles
 for each row execute function public.set_updated_at();
+
+-- Backend-managed authentication security tables. Atomic RPC functions and
+-- supporting indexes are installed by migrations/20260817_add_auth_security.sql.
+create table if not exists public.user_security_settings (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  mfa_enabled boolean not null default true,
+  mfa_enrolled_at timestamptz null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.auth_challenges (
+  id uuid primary key,
+  user_id uuid null references auth.users(id) on delete cascade,
+  purpose text not null check (purpose in ('signup', 'login', 'step_up_disable_mfa')),
+  email_hash text not null check (char_length(email_hash) = 64),
+  otp_digest text not null check (char_length(otp_digest) = 64),
+  ip_hash text null check (ip_hash is null or char_length(ip_hash) = 64),
+  bound_session_digest text null check (bound_session_digest is null or char_length(bound_session_digest) = 64),
+  expires_at timestamptz not null,
+  max_attempts smallint not null check (max_attempts between 1 and 10),
+  attempt_count smallint not null default 0 check (attempt_count >= 0),
+  resend_count smallint not null default 0 check (resend_count >= 0),
+  last_sent_at timestamptz not null default now(),
+  consumed_at timestamptz null,
+  revoked_at timestamptz null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.app_sessions (
+  session_digest text primary key check (char_length(session_digest) = 64),
+  refresh_token_digest text null check (refresh_token_digest is null or char_length(refresh_token_digest) = 64),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  last_activity_at timestamptz not null default now(),
+  absolute_expires_at timestamptz not null,
+  mfa_verified_at timestamptz null,
+  revoked_at timestamptz null,
+  revocation_reason text null check (revocation_reason is null or char_length(revocation_reason) <= 64)
+);
+alter table public.app_sessions add column if not exists refresh_token_digest text null;
+create unique index if not exists idx_app_sessions_refresh_token
+  on public.app_sessions(refresh_token_digest) where refresh_token_digest is not null;
+
+create table if not exists public.auth_risk_state (
+  risk_key text primary key check (char_length(risk_key) = 64),
+  failure_count integer not null default 0 check (failure_count >= 0),
+  window_started_at timestamptz not null default now(),
+  captcha_required_until timestamptz null,
+  blocked_until timestamptz null,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.security_audit_events (
+  id uuid primary key default gen_random_uuid(),
+  event_type text not null check (char_length(event_type) between 1 and 64),
+  outcome text not null check (char_length(outcome) between 1 and 32),
+  user_id uuid null references auth.users(id) on delete set null,
+  request_id text null check (request_id is null or char_length(request_id) <= 64),
+  ip_hash text null check (ip_hash is null or char_length(ip_hash) = 64),
+  session_hash text null check (session_hash is null or char_length(session_hash) = 64),
+  user_agent text null check (user_agent is null or char_length(user_agent) <= 256),
+  metadata jsonb not null default '{}'::jsonb check (jsonb_typeof(metadata) = 'object'),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.step_up_authorizations (
+  token_digest text primary key check (char_length(token_digest) = 64),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  session_digest text not null check (char_length(session_digest) = 64),
+  action text not null check (action in ('disable_mfa')),
+  expires_at timestamptz not null,
+  consumed_at timestamptz null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.user_security_settings enable row level security;
+alter table public.auth_challenges enable row level security;
+alter table public.app_sessions enable row level security;
+alter table public.auth_risk_state enable row level security;
+alter table public.security_audit_events enable row level security;
+alter table public.step_up_authorizations enable row level security;
+
+revoke all on public.user_security_settings, public.auth_challenges, public.app_sessions,
+  public.auth_risk_state, public.security_audit_events, public.step_up_authorizations
+from public, anon, authenticated;
+grant all on public.user_security_settings, public.auth_challenges, public.app_sessions,
+  public.auth_risk_state, public.security_audit_events, public.step_up_authorizations
+to service_role;

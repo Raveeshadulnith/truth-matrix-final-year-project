@@ -1,4 +1,3 @@
-import React from 'react';
 import type { MetadataEvidence } from '../../api/deepfakeApi';
 import {
   EmptyEvidenceMessage,

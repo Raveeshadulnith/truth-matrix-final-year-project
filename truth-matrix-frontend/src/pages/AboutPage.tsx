@@ -1,6 +1,5 @@
-import React from 'react';
 import { motion } from 'framer-motion';
-import {ShieldCheckIcon, BrainCircuitIcon, CodeIcon, GlobeIcon } from 'lucide-react';
+import { ShieldCheckIcon, BrainCircuitIcon, CodeIcon } from 'lucide-react';
 import { Card } from '../components/common/Card';
 export function AboutPage() {
   return (

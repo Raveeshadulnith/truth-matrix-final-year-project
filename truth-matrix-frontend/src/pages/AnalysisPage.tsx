@@ -60,7 +60,7 @@ export function AnalysisPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
-  const { startUpload, analysisStatus, uploadProgress } = useAnalysisStore();
+  const { startUpload } = useAnalysisStore();
   const [mediaType, setMediaType] = useState<Analysis['fileType']>('video');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState('');
@@ -296,9 +296,7 @@ export function AnalysisPage() {
               className="w-full rounded-2xl bg-gradient-to-r from-cyan-600 to-blue-700 px-6 py-3.5 text-base font-bold text-white shadow-lg shadow-cyan-600/25 transition hover:-translate-y-0.5 hover:shadow-xl hover:shadow-cyan-600/30 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0 dark:from-neon-cyan dark:to-neon-violet"
             >
               {isLoading
-                ? analysisStatus === 'trimming'
-                  ? `Creating clip ${uploadProgress}%`
-                  : 'Analyzing...'
+                ? 'Analyzing...'
                 : mediaType === 'video'
                   ? 'Analyze Selected Segment'
                   : 'Analyze'}
@@ -353,9 +351,7 @@ export function AnalysisPage() {
                 <div className="mb-4 h-2 overflow-hidden rounded-full bg-cyan-100 dark:bg-navy-900">
                   <div className="h-full w-2/3 animate-pulse rounded-full bg-cyan-600 dark:bg-neon-cyan" />
                 </div>
-                {analysisStatus === 'trimming'
-                  ? `Creating the selected clip locally (${uploadProgress}%)...`
-                  : `Analyzing with ${MODEL_NAMES[mediaType]}...`}
+                {`Analyzing the original file with ${MODEL_NAMES[mediaType]}...`}
               </div>
             )}
 

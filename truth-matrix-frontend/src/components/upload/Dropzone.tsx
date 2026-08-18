@@ -37,7 +37,7 @@ export function Dropzone({
     file: File;
     url: string;
   } | null>(null);
-  const validateFile = (file: File): string | null => {
+  const validateFile = useCallback((file: File): string | null => {
     if (!accept.includes(file.type)) {
       return 'File type not supported. Please upload an image, video, or audio file.';
     }
@@ -45,7 +45,7 @@ export function Dropzone({
       return `File too large. Maximum size is ${formatFileSize(maxSize)}.`;
     }
     return null;
-  };
+  }, [accept, maxSize]);
   const handleFile = useCallback(
     (file: File) => {
       setError(null);
@@ -68,7 +68,7 @@ export function Dropzone({
         });
       }
     },
-    [accept, maxSize]
+    [validateFile]
   );
   const handleDrop = useCallback(
     (e: React.DragEvent) => {

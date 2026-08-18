@@ -1,4 +1,3 @@
-import React from 'react';
 import { motion } from 'framer-motion';
 import { SunIcon, MoonIcon, MonitorIcon } from 'lucide-react';
 import { useUIStore } from '../../store/uiStore';
@@ -64,7 +63,7 @@ export function ThemeToggle({
     const nextIndex = (currentIndex + 1) % order.length;
     setTheme(order[nextIndex]);
   };
-  const currentTheme = themes.find((t) => t.value === theme)!;
+  const currentTheme = themes.find((t) => t.value === theme) || themes[0];
   const Icon = currentTheme.icon;
   return (
     <motion.button

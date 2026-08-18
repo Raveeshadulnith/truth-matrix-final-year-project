@@ -5,16 +5,22 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from services.supabase_service import get_supabase_auth_client
+from auth.security_config import get_security_config
+from auth.security_store import validate_and_touch_session
+from auth.security_utils import keyed_digest, session_id_from_verified_token
 
 load_dotenv()
 
 security = HTTPBearer(auto_error=False)
 
 
-def _credentials_exception(detail: str = "Invalid or missing authentication token") -> HTTPException:
+def _credentials_exception(
+    message: str = "Invalid or missing authentication token",
+    code: str = "AUTHENTICATION_REQUIRED",
+) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=detail,
+        detail={"code": code, "message": message},
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -42,7 +48,7 @@ def verify_supabase_jwt(token: str) -> Dict[str, Any]:
         response = get_supabase_auth_client().auth.get_user(token)
     except Exception as exc:
         if "expired" in str(exc).lower():
-            raise _credentials_exception("Authentication token has expired") from exc
+            raise _credentials_exception("Authentication token has expired", "SESSION_EXPIRED") from exc
         raise _credentials_exception() from exc
 
     user = _user_to_dict(getattr(response, "user", None))
@@ -69,11 +75,40 @@ async def get_current_user(
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise _credentials_exception("Authorization header must be Bearer token")
 
-    payload = verify_supabase_jwt(credentials.credentials)
+    token = credentials.credentials
+    payload = verify_supabase_jwt(token)
+    try:
+        session_id = session_id_from_verified_token(token)
+        session_digest = keyed_digest(session_id, purpose="app-session", audit=True)
+        config = get_security_config()
+        session_state = validate_and_touch_session(
+            {
+                "p_session_digest": session_digest,
+                "p_user_id": payload.get("sub"),
+                "p_idle_seconds": config.session_idle_timeout_seconds,
+                "p_touch_interval_seconds": config.session_touch_interval_seconds,
+            }
+        )
+    except Exception as exc:
+        raise _credentials_exception("Authentication session is invalid or expired", "SESSION_EXPIRED") from exc
+    if session_state.get("status") != "active":
+        if session_state.get("status") in {"idle_expired", "expired"}:
+            from auth.security_service import audit
+
+            event_type = "session_idle_expired" if session_state.get("status") == "idle_expired" else "session_expired"
+            audit(request, event_type, "revoked", user_id=payload.get("sub"), session_id=session_id)
+        raise _credentials_exception("Authentication session is invalid or expired", "SESSION_EXPIRED")
+    if config.mfa_required_for_all and not session_state.get("mfa_verified"):
+        from auth.security_service import audit
+
+        audit(request, "mfa_required", "session_rejected", user_id=payload.get("sub"), session_id=session_id)
+        raise _credentials_exception("Multi-factor authentication is required", "MFA_REQUIRED")
     return {
         "id": payload.get("sub"),
         "email": payload.get("email"),
         "role": payload.get("role"),
-        "token": credentials.credentials,
+        "token": token,
+        "session_id": session_id,
+        "session_digest": session_digest,
         "claims": payload,
     }

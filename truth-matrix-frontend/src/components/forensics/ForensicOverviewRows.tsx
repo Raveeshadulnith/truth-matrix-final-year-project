@@ -2,6 +2,7 @@ import { FileIcon, HistoryIcon } from 'lucide-react';
 import type { ForensicEvidence } from '../../api/deepfakeApi';
 import { formatFileSize } from '../../utils/formatters';
 import { SimilarityMatchesCard } from './SimilarityMatchesCard';
+import { ForensicStatusBadge } from './ForensicPrimitives';
 
 const FRIENDLY_MEDIA_TYPES: Record<string, string> = {
   'image/jpeg': 'JPEG image',
@@ -9,6 +10,9 @@ const FRIENDLY_MEDIA_TYPES: Record<string, string> = {
   'image/webp': 'WebP image',
   'video/mp4': 'MP4 video',
   'video/quicktime': 'QuickTime video',
+  'video/x-msvideo': 'AVI video',
+  'video/x-matroska': 'Matroska video',
+  'video/webm': 'WebM video',
   'audio/wav': 'WAV audio',
   'audio/mpeg': 'MP3 audio',
 };
@@ -30,17 +34,25 @@ export function FileOverviewRow({ evidence }: { evidence: ForensicEvidence }) {
   const width = dimension(evidence, 'width');
   const height = dimension(evidence, 'height');
   const facts = [
+    evidence.original_filename ?? null,
     evidence.detected_mime_type
       ? FRIENDLY_MEDIA_TYPES[evidence.detected_mime_type] ?? evidence.detected_mime_type
       : 'File type unavailable',
     evidence.file_size_bytes != null ? formatFileSize(evidence.file_size_bytes) : null,
     width != null && height != null ? `${width} x ${height} pixels` : null,
+    evidence.sha256 ? `SHA-256 ${evidence.sha256.slice(0, 12)}…` : null,
   ].filter((value): value is string => Boolean(value));
 
   return (
     <div className="flex min-w-0 items-start gap-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm dark:border-navy-700 dark:bg-navy-800">
       <FileIcon className="mt-0.5 h-5 w-5 flex-none text-blue-600 dark:text-blue-400" aria-hidden="true" />
-      <div className="min-w-0"><p className="text-sm font-semibold text-gray-900 dark:text-white">File overview</p><p className="mt-1 break-words text-sm text-gray-600 dark:text-gray-300">{facts.join(' | ')}</p></div>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-gray-900 dark:text-white">File overview</p>
+          <ForensicStatusBadge status={evidence.file_identity_status} />
+        </div>
+        <p className="mt-1 break-words text-sm text-gray-600 dark:text-gray-300">{facts.join(' | ')}</p>
+      </div>
     </div>
   );
 }

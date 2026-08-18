@@ -1,6 +1,5 @@
-import React from 'react';
 import { motion } from 'framer-motion';
-import { CodeIcon, TerminalIcon, KeyIcon, BookOpenIcon } from 'lucide-react';
+import { TerminalIcon, KeyIcon, BookOpenIcon } from 'lucide-react';
 import { Card } from '../components/common/Card';
 import { Badge } from '../components/common/Badge';
 export function ApiDocsPage() {
